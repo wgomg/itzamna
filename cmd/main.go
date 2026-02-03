@@ -18,6 +18,10 @@ func main() {
 		log := utils.NewLogger("error", cfg.App.RawBodyLog)
 		log.Fatal("Failed to load configuration:", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		log := utils.NewLogger("error", cfg.App.RawBodyLog)
+		log.Fatal("Invalid configuration:", err)
+	}
 
 	logger := utils.NewLogger(cfg.App.LogLevel, cfg.App.RawBodyLog)
 	logger.Info("Starting Document Processing Service")

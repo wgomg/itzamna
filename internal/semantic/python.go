@@ -39,7 +39,6 @@ type PythonWorker struct {
 	process *exec.Cmd
 	stdin   io.WriteCloser
 	stdout  io.ReadCloser
-	scanner *bufio.Scanner
 	mu      sync.Mutex
 	pool    *PythonWorkerPool
 }
@@ -164,7 +163,7 @@ func (p *PythonWorkerPool) startWorker(id int) (*PythonWorker, error) {
 	if !scanner.Scan() {
 		stdin.Close()
 		stdout.Close()
-		return nil, fmt.Errorf("failed to read stREADYrtup message")
+		return nil, fmt.Errorf("failed to read READY message")
 	}
 
 	var readyMsg struct {
@@ -190,7 +189,6 @@ func (p *PythonWorkerPool) startWorker(id int) (*PythonWorker, error) {
 		process: cmd,
 		stdin:   stdin,
 		stdout:  stdout,
-		scanner: scanner,
 		pool:    p,
 	}, nil
 }
@@ -198,6 +196,8 @@ func (p *PythonWorkerPool) startWorker(id int) (*PythonWorker, error) {
 func (w *PythonWorker) processTask(task Task) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	scanner := bufio.NewScanner(w.stdout)
 
 	req := PythonRequest{
 		Text:         task.Text,
@@ -214,9 +214,9 @@ func (w *PythonWorker) processTask(task Task) error {
 		return fmt.Errorf("write request: %w", err)
 	}
 
-	if w.scanner.Scan() {
+	if scanner.Scan() {
 		var resp PythonResponse
-		if err := json.Unmarshal([]byte(w.scanner.Text()), &resp); err != nil {
+		if err := json.Unmarshal([]byte(scanner.Text()), &resp); err != nil {
 			return fmt.Errorf("parse response: %w", err)
 		}
 		if resp.Error != "" {
@@ -226,7 +226,7 @@ func (w *PythonWorker) processTask(task Task) error {
 		return nil
 	}
 
-	if err := w.scanner.Err(); err != nil {
+	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read stdout: %w", err)
 	}
 	return fmt.Errorf("stdout closed")

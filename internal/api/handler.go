@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"path"
 	"slices"
@@ -41,12 +43,13 @@ func NewHandler(
 }
 
 func (h *Handler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
-	_, err := httputils.LogRequestBody(r, h.logger)
+	bodyBytes, err := httputils.LogRequestBody(r, h.logger)
 	if err != nil {
 		h.logger.Error("Failed to read request body: %v", err)
 		httputils.HandleError(w, err)
 		return
 	}
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 	if err := httputils.ValidateMethod(r, http.MethodPost); err != nil {
 		h.logger.Error("Method validation error: %v", err)

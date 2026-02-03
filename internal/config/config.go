@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -137,6 +138,16 @@ func Load() (*Config, error) {
 			MinPenalty:         getEnvFloat("REDUCTION_MIN_PENALTY", 0.1),
 		},
 	}, nil
+}
+
+func (c *Config) Validate() error {
+	if c.Paperless.URL == "" || c.Paperless.Token == "" {
+		return fmt.Errorf("PAPERLESS_URL and PAPERLESS_TOKEN are required")
+	}
+	if c.Llm.URL == "" || c.Llm.Token == "" {
+		return fmt.Errorf("LLM_URL and LLM_TOKEN are required")
+	}
+	return nil
 }
 
 func parseEnvironment(envStr string) Environment {
