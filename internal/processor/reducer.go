@@ -47,11 +47,11 @@ func ReduceContent(content string, cfg *config.ReductionConfig) string {
 		for i := range remainingChunks {
 			similarity := jaccardSimilarity(selected.UniqueTokens, remainingChunks[i].UniqueTokens)
 
-			if similarity > 0.15 {
-				penalty := 1.0 - (similarity * 2.0)
+			if similarity > cfg.DiversityThreshold {
+				penalty := cfg.MinPenalty - (similarity * 2.0)
 
-				if penalty < 0.1 {
-					penalty = 0.1
+				if penalty < cfg.MinPenalty {
+					penalty = cfg.MinPenalty
 				}
 
 				remainingChunks[i].FinalScore *= penalty

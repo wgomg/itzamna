@@ -239,7 +239,11 @@ func (h *Handler) Process(document *paperless.Document) error {
 		}
 	}
 
-	correspondent, err := h.paperless.CreateCorrespondent(*utils.Truncate(&result.Author, 127))
+	maxStringLength := 127
+
+	correspondent, err := h.paperless.CreateCorrespondent(
+		*utils.Truncate(&result.Author, maxStringLength),
+	)
 	if err != nil {
 		h.logger.Error("Failed to create new correspondent: %v", err)
 		return err
@@ -259,7 +263,7 @@ func (h *Handler) Process(document *paperless.Document) error {
 	}
 
 	updatedDocument := paperless.DocumentUpdate{
-		Title:         utils.Truncate(&result.Title, 127),
+		Title:         utils.Truncate(&result.Title, maxStringLength),
 		Tags:          documentTagsIds,
 		DocumentType:  &documentType,
 		Correspondent: &correspondent.ID,
