@@ -144,6 +144,7 @@ func (c *Client) AnalyzeContent(
 
 	responseContent := chatResp.Choices[0].Message.Content
 	responseContent = strings.TrimSpace(responseContent)
+	responseContent = utils.CleanCodeBlock(responseContent)
 
 	c.logger.Debug("LLM raw response: %s", responseContent)
 

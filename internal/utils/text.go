@@ -36,3 +36,13 @@ func Truncate(s *string, maxLenght int) *string {
 	trunc := (*s)[:maxLenght]
 	return &trunc
 }
+
+func CleanCodeBlock(s string) string {
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```JSON")
+	s = strings.TrimPrefix(s, "```")
+
+	s = strings.TrimSuffix(s, "```")
+
+	return strings.TrimSpace(s)
+}
