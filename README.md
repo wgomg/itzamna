@@ -27,7 +27,7 @@ A microservice that integrates with Paperless-ngx via webhooks to automatically 
 # Clone and build
 git clone <repository-url>
 cd itzamna
-go build -o itzamna ./cmd
+go build -o itzamna ./cmd/main.go
 
 # Configure environment
 export PAPERLESS_URL="https://your-paperless-instance"
@@ -73,7 +73,7 @@ LOG_LEVEL=info
 # Semantic matching
 SEMANTIC_MODEL_NAME=all-MiniLM-L6-v2  # or multilingual model
 SEMANTIC_MIN_SIMILARITY=0.2
-SEMANTIC_WORKER_COUNT=auto  # auto-calculated based on system resources
+SEMANTIC_WORKER_COUNT=2  # do not include for automatic
 
 # Text reduction
 REDUCTION_THRESHOLD_TOKENS=2000
@@ -238,7 +238,7 @@ export SEMANTIC_MODEL_NAME="paraphrase-multilingual-MiniLM-L12-v2"
 
 **Low similarity scores:**
 
-- Scores typically range 0.1-0.35 for meaningful relationships
+- Scores typically range 0.2 and above for meaningful relationships
 - Consider lowering `SEMANTIC_MIN_SIMILARITY` to 0.15
 - Use multilingual models for non-English documents
 
@@ -273,6 +273,6 @@ All models are open-source and freely available for commercial use.
 
 ---
 
-_Last Updated: 2026-01-28_
-_Implementation Version: 1.3.0_
+_Last Updated: 2026-02-04_
+_Implementation Version: 1.3.1_
 _Changes: Added `/process/untagged` endpoint for manual document processing_
