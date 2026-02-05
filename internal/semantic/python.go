@@ -68,7 +68,7 @@ func NewPythonMatcher(logger *utils.Logger, cfg *config.SemanticConfig) *PythonW
 }
 
 func (p *PythonWorkerPool) Initialize() error {
-	p.logger.Info("Initializing Python semantic matcher with %d workers", p.cfg.WorkerCount)
+	p.logger.Info(nil, "Initializing Python semantic matcher with %d workers", p.cfg.WorkerCount)
 
 	if err := p.setupEnvironment(); err != nil {
 		return fmt.Errorf("failed to setup environment: %w", err)
@@ -79,7 +79,7 @@ func (p *PythonWorkerPool) Initialize() error {
 		go p.runWorker(i)
 	}
 
-	p.logger.Info("Python semantic matcher initialized successfully")
+	p.logger.Info(nil, "Python semantic matcher initialized successfully")
 	return nil
 }
 
@@ -102,7 +102,7 @@ func (p *PythonWorkerPool) runWorker(id int) {
 
 	worker, err := p.startWorker(id)
 	if err != nil {
-		p.logger.Error("Failed to start worker %d: %v", id, err)
+		p.logger.Error(nil, "Failed to start worker %d: %v", id, err)
 		return
 	}
 	defer worker.close()
@@ -182,7 +182,7 @@ func (p *PythonWorkerPool) startWorker(id int) (*PythonWorker, error) {
 		return nil, fmt.Errorf("unexpected startup status: %s", readyMsg.Status)
 	}
 
-	p.logger.Debug("Python worker %d ready (embedding_dim=%d)", id, readyMsg.EmbeddingDim)
+	p.logger.Debug(nil, "Python worker %d ready (embedding_dim=%d)", id, readyMsg.EmbeddingDim)
 
 	return &PythonWorker{
 		id:      id,
@@ -283,7 +283,7 @@ func (p *PythonWorkerPool) checkPython() error {
 		return fmt.Errorf("python3 not found: %w", err)
 	}
 
-	p.logger.Debug("Python3 found")
+	p.logger.Debug(nil, "Python3 found")
 	return nil
 }
 
@@ -291,25 +291,25 @@ func (p *PythonWorkerPool) createVenv() error {
 	venvPython := filepath.Join(p.venv, "bin", "python")
 
 	if _, err := os.Stat(venvPython); err == nil {
-		p.logger.Debug("Virtual environment already exists at %s", p.venv)
+		p.logger.Debug(nil, "Virtual environment already exists at %s", p.venv)
 		return nil
 	}
 
-	p.logger.Info("Creating virtual environment at %s", p.venv)
+	p.logger.Info(nil, "Creating virtual environment at %s", p.venv)
 
 	cmd := exec.Command("python3", "-m", "venv", p.venv)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create venv: %s: %w", output, err)
 	}
 
-	p.logger.Info("Virtual environment created successfully")
+	p.logger.Info(nil, "Virtual environment created successfully")
 	return nil
 }
 
 func (p *PythonWorkerPool) installRequirements() error {
 	venvPip := filepath.Join(p.venv, "bin", "pip")
 
-	p.logger.Info("Installing Python requirements")
+	p.logger.Info(nil, "Installing Python requirements")
 
 	requirements := []string{
 		"sentence-transformers>=2.2.2",
@@ -318,7 +318,7 @@ func (p *PythonWorkerPool) installRequirements() error {
 	}
 
 	for _, req := range requirements {
-		p.logger.Debug("Installing: %s", req)
+		p.logger.Debug(nil, "Installing: %s", req)
 
 		cmd := exec.Command(venvPip, "install", req)
 		if output, err := cmd.CombinedOutput(); err != nil {
@@ -326,7 +326,7 @@ func (p *PythonWorkerPool) installRequirements() error {
 		}
 	}
 
-	p.logger.Info("Python requirements installed successfully")
+	p.logger.Info(nil, "Python requirements installed successfully")
 	return nil
 }
 
@@ -338,11 +338,11 @@ func (p *PythonWorkerPool) extractScriptIfNeeded() error {
 	}
 
 	if _, err := os.Stat(p.script); err == nil {
-		p.logger.Debug("Python script already exists at %s", p.script)
+		p.logger.Debug(nil, "Python script already exists at %s", p.script)
 		return nil
 	}
 
-	p.logger.Info("Extracting embedded Python script to %s", p.script)
+	p.logger.Info(nil, "Extracting embedded Python script to %s", p.script)
 
 	if err := os.WriteFile(p.script, []byte(embeddedPythonScript), 0755); err != nil {
 		return fmt.Errorf("failed to write python script: %w", err)
@@ -358,7 +358,7 @@ func (p *PythonWorkerPool) extractScriptIfNeeded() error {
 		return fmt.Errorf("failed to write requirements file: %w", err)
 	}
 
-	p.logger.Info("Python script extracted successfully")
+	p.logger.Info(nil, "Python script extracted successfully")
 	return nil
 }
 

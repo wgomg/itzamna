@@ -43,78 +43,94 @@ func NewHandler(
 }
 
 func (h *Handler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
-	bodyBytes, err := httputils.LogRequestBody(r, h.logger)
+	ctx := r.Context()
+	reqID := ctx.Value("reqid").(string)
+
+	bodyBytes, err := httputils.LogRequestBody(r, h.logger, reqID)
 	if err != nil {
-		h.logger.Error("Failed to read request body: %v", err)
+		h.logger.Error(&reqID, "Failed to read request body: %v", err)
 		httputils.HandleError(w, err)
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 	if err := httputils.ValidateMethod(r, http.MethodPost); err != nil {
-		h.logger.Error("Method validation error: %v", err)
+		h.logger.Error(&reqID, "Method validation error: %v", err)
 		httputils.HandleError(w, err)
 		return
 	}
 
 	var payload WebhookPayload
 	if err := httputils.DecodeJSON(r, &payload); err != nil {
-		h.logger.Error("JSON decode error: %v", err)
+		h.logger.Error(&reqID, "JSON decode error: %v", err)
 		httputils.HandleError(w, err)
 		return
 	}
 
 	documentID, err := h.extractDocumentID(payload.DocumentURL)
 	if err != nil {
-		h.logger.Error("Failed to extract document ID from URL '%s': %v", payload.DocumentURL, err)
+		h.logger.Error(
+			&reqID,
+			"Failed to extract document ID from URL '%s': %v",
+			payload.DocumentURL,
+			err,
+		)
 		httputils.HandleError(w, err)
 		return
 	}
 
-	h.logger.Info("Received webhook: event=%s, document_id=%d", payload.DocumentURL, documentID)
+	h.logger.Info(
+		&reqID,
+		"Received webhook: event=%s, document_id=%d",
+		payload.DocumentURL,
+		documentID,
+	)
 
-	document, err := h.paperless.GetDocument(documentID)
+	document, err := h.paperless.GetDocument(documentID, reqID)
 	if err != nil {
-		h.logger.Error("Failed to fetch document %d: %v", documentID, err)
+		h.logger.Error(&reqID, "Failed to fetch document %d: %v", documentID, err)
 		httputils.HandleError(w, err)
 		return
 	}
 
-	if err := h.Process(document); err != nil {
-		h.logger.Error("Error processing webhook: %v", err)
+	if err := h.Process(document, reqID); err != nil {
+		h.logger.Error(&reqID, "Error processing webhook: %v", err)
 		httputils.HandleError(w, err)
 		return
 	}
 
 	if err := httputils.SuccessResponse(w, "Webhook processed successfully", nil); err != nil {
-		h.logger.Error("Error sending response: %v", err)
+		h.logger.Error(&reqID, "Error sending response: %v", err)
 	}
 }
 
 func (h *Handler) HandleProcessUntagged(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	reqID := ctx.Value("reqid").(string)
+
 	if err := httputils.ValidateMethod(r, http.MethodPost); err != nil {
-		h.logger.Error("Method validation error: %v", err)
+		h.logger.Error(&reqID, "Method validation error: %v", err)
 		httputils.HandleError(w, err)
 		return
 	}
 
-	documents, err := h.paperless.GetDocumentsWithoutTags()
+	documents, err := h.paperless.GetDocumentsWithoutTags(reqID)
 	if err != nil {
-		h.logger.Error("Failed to fetch untagged documents: %v", err)
+		h.logger.Error(&reqID, "Failed to fetch untagged documents: %v", err)
 		httputils.HandleError(w, err)
 		return
 	}
 
-	h.logger.Info("Found %d untagged documents to process", len(documents))
+	h.logger.Info(&reqID, "Found %d untagged documents to process", len(documents))
 
 	var processed, failed int
 	var failedIDs []int
 
 	for _, document := range documents {
-		h.logger.Info("Processing untagged document ID=%d", document.ID)
+		h.logger.Info(&reqID, "Processing untagged document ID=%d", document.ID)
 
-		if err := h.Process(&document); err != nil {
-			h.logger.Error("Error processing untagged document ID=%d: %v", document.ID, err)
+		if err := h.Process(&document, reqID); err != nil {
+			h.logger.Error(&reqID, "Error processing untagged document ID=%d: %v", document.ID, err)
 
 			failed++
 			failedIDs = append(failedIDs, document.ID)
@@ -122,7 +138,7 @@ func (h *Handler) HandleProcessUntagged(w http.ResponseWriter, r *http.Request) 
 		}
 
 		processed++
-		h.logger.Info("Successfully processed untagged document ID=%d", document.ID)
+		h.logger.Info(&reqID, "Successfully processed untagged document ID=%d", document.ID)
 	}
 
 	response := map[string]interface{}{
@@ -137,7 +153,7 @@ func (h *Handler) HandleProcessUntagged(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := httputils.SuccessResponse(w, "Untagged documents processing completed", response); err != nil {
-		h.logger.Error("Error sending response: %v", err)
+		h.logger.Error(&reqID, "Error sending response: %v", err)
 	}
 }
 
@@ -153,33 +169,33 @@ func (h *Handler) extractDocumentID(documentURL string) (int, error) {
 	return documentID, nil
 }
 
-func (h *Handler) Process(document *paperless.Document) error {
-	h.logger.Info("Processing document ID: %d", document.ID)
-	h.logger.Debug("Document content preview: %.200s...", document.Content)
+func (h *Handler) Process(document *paperless.Document, reqID string) error {
+	h.logger.Info(&reqID, "Processing document ID: %d", document.ID)
+	h.logger.Debug(&reqID, "Document content preview: %.200s...", document.Content)
 
 	estimatedTokens := processor.EstimateTokens(document.Content)
 	shouldReduce := processor.ShouldReduceContent(estimatedTokens, h.cfg.Reduction.ThresholdTokens)
 
-	h.logger.Info("Path decision: estimated_tokens=%d, threshold=%d, should_reduce=%v",
+	h.logger.Info(&reqID, "Path decision: estimated_tokens=%d, threshold=%d, should_reduce=%v",
 		estimatedTokens, h.cfg.Reduction.ThresholdTokens, shouldReduce)
 
 	llmContent := document.Content
 
 	if shouldReduce {
-		h.logger.Info("LONG PATH selected: document requires reduction")
+		h.logger.Info(&reqID, "LONG PATH selected: document requires reduction")
 		llmContent = processor.ReduceContent(document.Content, &h.cfg.Reduction)
-		h.logger.Debug("Reduced Content: %s", llmContent)
+		h.logger.Debug(&reqID, "Reduced Content: %s", llmContent)
 	}
 
-	documentTypes, err := h.paperless.GetDocumentTypes()
+	documentTypes, err := h.paperless.GetDocumentTypes(reqID)
 	if err != nil {
-		h.logger.Error("Failed to fetch document types: %v", err)
+		h.logger.Error(&reqID, "Failed to fetch document types: %v", err)
 		return err
 	}
 
-	tags, err := h.paperless.GetTags()
+	tags, err := h.paperless.GetTags(reqID)
 	if err != nil {
-		h.logger.Error("Failed to fetch tags: %v", err)
+		h.logger.Error(&reqID, "Failed to fetch tags: %v", err)
 		return err
 	}
 
@@ -191,23 +207,24 @@ func (h *Handler) Process(document *paperless.Document) error {
 	if len(suggestedTags) > h.cfg.Semantic.TagsThreshold {
 		suggestedTags, err = h.semanticMatcher.GetTagSuggestions(llmContent, suggestedTags)
 		if err != nil {
-			h.logger.Error("Failed to get semantic tag suggestions: %v", err)
+			h.logger.Error(&reqID, "Failed to get semantic tag suggestions: %v", err)
 			return err
 		}
 	}
-	h.logger.Info("Semantic tag suggestions: %v", suggestedTags)
+	h.logger.Info(&reqID, "Semantic tag suggestions: %v", suggestedTags)
 
 	result, err := h.llm.AnalyzeContent(
 		llmContent,
 		document.PageCount,
 		documentTypes,
 		suggestedTags,
+		reqID,
 	)
 	if err != nil {
-		h.logger.Error("LLM request failed: %v", err)
+		h.logger.Error(&reqID, "LLM request failed: %v", err)
 		return err
 	}
-	h.logger.Debug("Result: %v", result)
+	h.logger.Debug(&reqID, "Result: %v", result)
 
 	allTagsNames := make([]string, len(tags))
 	for i, t := range tags {
@@ -224,9 +241,9 @@ func (h *Handler) Process(document *paperless.Document) error {
 		}
 	}
 
-	createdTags, err := h.paperless.CreateTags(documentNewTags)
+	createdTags, err := h.paperless.CreateTags(documentNewTags, reqID)
 	if err != nil {
-		h.logger.Error("Failed to create new tags: %v", err)
+		h.logger.Error(&reqID, "Failed to create new tags: %v", err)
 		return err
 	}
 	var documentTagsIds []int
@@ -242,10 +259,10 @@ func (h *Handler) Process(document *paperless.Document) error {
 	maxStringLength := 127
 
 	correspondent, err := h.paperless.CreateCorrespondent(
-		*utils.Truncate(&result.Author, maxStringLength),
+		*utils.Truncate(&result.Author, maxStringLength), reqID,
 	)
 	if err != nil {
-		h.logger.Error("Failed to create new correspondent: %v", err)
+		h.logger.Error(&reqID, "Failed to create new correspondent: %v", err)
 		return err
 	}
 
@@ -269,13 +286,13 @@ func (h *Handler) Process(document *paperless.Document) error {
 		Correspondent: &correspondent.ID,
 	}
 
-	err = h.paperless.UpdateDocument(document.ID, &updatedDocument)
+	err = h.paperless.UpdateDocument(document.ID, &updatedDocument, reqID)
 	if err != nil {
-		h.logger.Error("Failed to update document %d: %v", document.ID, err)
+		h.logger.Error(&reqID, "Failed to update document %d: %v", document.ID, err)
 		return err
 	}
 
-	h.logger.Info(
+	h.logger.Info(&reqID,
 		"Document updated successfully: Title='%s', Tags=%v, DocumentType=%v, Correspondent=%v",
 		*updatedDocument.Title,
 		updatedDocument.Tags,

@@ -17,12 +17,12 @@ func NewMatcher(logger *utils.Logger, cfg *config.SemanticConfig) (Matcher, erro
 		devScriptPath := filepath.Join("scripts", "semantic_matcher.py")
 		if _, err := os.Stat(devScriptPath); err == nil {
 			scriptPath = devScriptPath
-			logger.Info("Using development Python script at %s", scriptPath)
+			logger.Info(nil, "Using development Python script at %s", scriptPath)
 		} else {
-			logger.Info("Python script will be extracted from embedded resources")
+			logger.Info(nil, "Python script will be extracted from embedded resources")
 		}
 	} else {
-		logger.Info("Using existing Python script at %s", scriptPath)
+		logger.Info(nil, "Using existing Python script at %s", scriptPath)
 	}
 
 	matcher := NewPythonMatcher(logger, cfg)

@@ -32,7 +32,7 @@ func SuccessResponse(w http.ResponseWriter, message string, data any) error {
 	return JSONResponse(w, http.StatusOK, response)
 }
 
-func LogResponseBody(resp *http.Response, logger *utils.Logger) ([]byte, error) {
+func LogResponseBody(resp *http.Response, logger *utils.Logger, reqID string) ([]byte, error) {
 	if !logger.RawBodyLog {
 		return nil, nil
 	}
@@ -44,7 +44,7 @@ func LogResponseBody(resp *http.Response, logger *utils.Logger) ([]byte, error) 
 
 	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	logger.Debug("Raw response body: %s", string(bodyBytes))
+	logger.Debug(&reqID, "Raw response body: %s", string(bodyBytes))
 
 	return bodyBytes, nil
 }

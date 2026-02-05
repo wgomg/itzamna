@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -29,14 +30,14 @@ func NewLogger(level string, rawBodyLog bool) *Logger {
 
 	return &Logger{
 		level:       logLevel,
-		infoLogger:  log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile),
-		errorLogger: log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile),
+		infoLogger:  log.New(os.Stdout, "INFO  : ", log.Ldate|log.Ltime|log.Lshortfile),
+		errorLogger: log.New(os.Stderr, "ERROR : ", log.Ldate|log.Ltime|log.Lshortfile),
 		debugLogger: log.New(
 			os.Stdout,
-			"DEBUG: ",
+			"DEBUG : ",
 			log.Ldate|log.Ltime|log.Lshortfile,
 		),
-		fatalLogger: log.New(os.Stderr, "FATAL: ", log.Ldate|log.Ltime|log.Lshortfile),
+		fatalLogger: log.New(os.Stderr, "FATAL : ", log.Ldate|log.Ltime|log.Lshortfile),
 		RawBodyLog:  rawBodyLog,
 	}
 }
@@ -64,20 +65,33 @@ func parseLogLevel(level string) LogLevel {
 	}
 }
 
-func (l *Logger) Info(format string, v ...any) {
+func (l *Logger) Info(reqID *string, format string, v ...any) {
 	if l.level == LevelError {
 		return
 	}
+
+	if reqID != nil {
+		format = fmt.Sprintf("REQID=%s ", *reqID) + format
+	}
+
 	l.infoLogger.Printf(format, v...)
 }
 
-func (l *Logger) Error(format string, v ...any) {
+func (l *Logger) Error(reqID *string, format string, v ...any) {
+	if reqID != nil {
+		format = fmt.Sprintf("REQID=%s ", *reqID) + format
+	}
+
 	l.errorLogger.Printf(format, v...)
 }
 
-func (l *Logger) Debug(format string, v ...any) {
+func (l *Logger) Debug(reqID *string, format string, v ...any) {
 	if l.level != LevelDebug {
 		return
+	}
+
+	if reqID != nil {
+		format = fmt.Sprintf("REQID=%s ", *reqID) + format
 	}
 	l.debugLogger.Printf(format, v...)
 }

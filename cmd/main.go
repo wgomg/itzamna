@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/wgomg/itzamna/internal/api"
@@ -24,42 +23,36 @@ func main() {
 	}
 
 	logger := utils.NewLogger(cfg.App.LogLevel, cfg.App.RawBodyLog)
-	logger.Info("Starting Document Processing Service")
-	logger.Info("Environment: %s", cfg.App.Env)
-	logger.Info("Log level: %s", cfg.App.LogLevel)
-	logger.Info("Python config directory: %s", cfg.Semantic.Python.ConfigDir)
+	logger.Info(nil, "Starting Document Processing Service")
+	logger.Info(nil, "Environment: %s", cfg.App.Env)
+	logger.Info(nil, "Log level: %s", cfg.App.LogLevel)
+	logger.Info(nil, "Python config directory: %s", cfg.Semantic.Python.ConfigDir)
 
 	paperlessClient, err := paperless.NewClient(cfg, logger)
 	if err != nil {
-		logger.Error("Failed to create Paperless client: %v", err)
-		logger.Fatal("Missing required configuration")
+		logger.Error(nil, "Failed to create Paperless client: %v", err)
+		logger.Fatal(nil, "Missing required configuration")
 	}
 	llmClient, err := llm.NewClient(cfg, logger)
 	if err != nil {
-		logger.Error("Failed to create LLM client: %v", err)
+		logger.Error(nil, "Failed to create LLM client: %v", err)
 		logger.Fatal("Missing required configuration")
 	}
 	semanticMatcher, err := semantic.NewMatcher(logger, &cfg.Semantic)
 	if err != nil {
-		logger.Error("Failed to create semantic matcher: %v", err)
+		logger.Error(nil, "Failed to create semantic matcher: %v", err)
 		logger.Fatal("Failed to initialize semantic matcher")
 	}
 	defer semanticMatcher.Close()
 
 	webhookhandler := api.NewHandler(logger, paperlessClient, llmClient, semanticMatcher, cfg)
 
-	mux := http.NewServeMux()
+	mux := api.RegisterRoutes(webhookhandler)
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Document Processing Service is running\n")
-	})
-
-	api.RegisterRoutes(mux, webhookhandler)
-
-	logger.Info("Starting server on port %s", cfg.App.ServerPort)
-	logger.Info("Endpoints:")
-	logger.Info("  GET  /health")
-	logger.Info("  POST /webhook")
-	logger.Info("  POST /process/untagged")
+	logger.Info(nil, "Starting server on port %s", cfg.App.ServerPort)
+	logger.Info(nil, "Endpoints:")
+	logger.Info(nil, "  GET  /health")
+	logger.Info(nil, "  POST /webhook")
+	logger.Info(nil, "  POST /process/untagged")
 	logger.Fatal(http.ListenAndServe("0.0.0.0:"+cfg.App.ServerPort, mux))
 }

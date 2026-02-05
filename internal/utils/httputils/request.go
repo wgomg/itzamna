@@ -36,7 +36,7 @@ func ValidateMethod(r *http.Request, allowedMethod string) error {
 	return nil
 }
 
-func LogRequestBody(r *http.Request, logger *utils.Logger) ([]byte, error) {
+func LogRequestBody(r *http.Request, logger *utils.Logger, reqID string) ([]byte, error) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, err
@@ -44,7 +44,7 @@ func LogRequestBody(r *http.Request, logger *utils.Logger) ([]byte, error) {
 
 	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	logger.Debug("Raw request body: %s", string(bodyBytes))
+	logger.Debug(&reqID, "Raw request body: %s", string(bodyBytes))
 
 	return bodyBytes, nil
 }

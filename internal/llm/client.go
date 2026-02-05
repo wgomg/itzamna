@@ -43,6 +43,7 @@ func (c *Client) AnalyzeContent(
 	pages int,
 	documentTypes []paperless.DocumentType,
 	tags []string,
+	reqID string,
 ) (*AnalysisResult, error) {
 	typesString := ""
 	if len(documentTypes) > 0 {
@@ -107,7 +108,7 @@ func (c *Client) AnalyzeContent(
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	c.logger.Debug("Sending LLM request: %s", string(jsonBody))
+	c.logger.Debug(&reqID, "Sending LLM request: %s", string(jsonBody))
 
 	req, err := http.NewRequest("POST", c.baseURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
@@ -133,7 +134,7 @@ func (c *Client) AnalyzeContent(
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	c.logger.Debug("LLM usage - prompt_tokens: %d, completion_tokens: %d, total_tokens: %d",
+	c.logger.Debug(&reqID, "LLM usage - prompt_tokens: %d, completion_tokens: %d, total_tokens: %d",
 		chatResp.Usage.PromptTokens,
 		chatResp.Usage.CompletionTokens,
 		chatResp.Usage.TotalTokens)
@@ -146,7 +147,7 @@ func (c *Client) AnalyzeContent(
 	responseContent = strings.TrimSpace(responseContent)
 	responseContent = utils.CleanCodeBlock(responseContent)
 
-	c.logger.Debug("LLM raw response: %s", responseContent)
+	c.logger.Debug(&reqID, "LLM raw response: %s", responseContent)
 
 	var analysisResult AnalysisResult
 	if err := json.Unmarshal([]byte(responseContent), &analysisResult); err != nil {

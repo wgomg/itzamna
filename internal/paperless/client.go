@@ -36,7 +36,7 @@ func NewClient(cfg *config.Config, logger *utils.Logger) (*Client, error) {
 	}, nil
 }
 
-func (c *Client) GetDocument(documentID int) (*Document, error) {
+func (c *Client) GetDocument(documentID int, reqID string) (*Document, error) {
 	url := fmt.Sprintf("%s/api/documents/%d/", c.baseURL, documentID)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -46,14 +46,14 @@ func (c *Client) GetDocument(documentID int) (*Document, error) {
 
 	c.setAuthHeaders(req)
 
-	c.logger.Debug("Fetching document %d from %s", documentID, c.baseURL)
+	c.logger.Debug(&reqID, "Fetching document %d from %s", documentID, c.baseURL)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch document: %w", err)
 	}
 	defer resp.Body.Close()
 
-	_, err = httputils.LogResponseBody(resp, c.logger)
+	_, err = httputils.LogResponseBody(resp, c.logger, reqID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -70,11 +70,11 @@ func (c *Client) GetDocument(documentID int) (*Document, error) {
 	return &document, nil
 }
 
-func (c *Client) GetDocumentsWithoutTags() ([]Document, error) {
+func (c *Client) GetDocumentsWithoutTags(reqID string) ([]Document, error) {
 	url := fmt.Sprintf("%s/api/documents/?is_tagged=false", c.baseURL)
 	var allUntaggedDocuments []Document
 
-	c.logger.Debug("Fetching untagged documents from %s", url)
+	c.logger.Debug(&reqID, "Fetching untagged documents from %s", url)
 	for url != "" {
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
@@ -89,7 +89,7 @@ func (c *Client) GetDocumentsWithoutTags() ([]Document, error) {
 		}
 		defer resp.Body.Close()
 
-		_, err = httputils.LogResponseBody(resp, c.logger)
+		_, err = httputils.LogResponseBody(resp, c.logger, reqID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read response body: %w", err)
 		}
@@ -107,12 +107,12 @@ func (c *Client) GetDocumentsWithoutTags() ([]Document, error) {
 		url = documentsResponse.Next
 	}
 
-	c.logger.Debug("Found %d untagged documents.", len(allUntaggedDocuments))
+	c.logger.Debug(&reqID, "Found %d untagged documents.", len(allUntaggedDocuments))
 
 	return allUntaggedDocuments, nil
 }
 
-func (c *Client) GetDocumentTypes() ([]DocumentType, error) {
+func (c *Client) GetDocumentTypes(reqID string) ([]DocumentType, error) {
 	url := fmt.Sprintf("%s/api/document_types/", c.baseURL)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -122,14 +122,14 @@ func (c *Client) GetDocumentTypes() ([]DocumentType, error) {
 
 	c.setAuthHeaders(req)
 
-	c.logger.Debug("Fetching document types from %s", url)
+	c.logger.Debug(&reqID, "Fetching document types from %s", url)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch document types: %w", err)
 	}
 	defer resp.Body.Close()
 
-	_, err = httputils.LogResponseBody(resp, c.logger)
+	_, err = httputils.LogResponseBody(resp, c.logger, reqID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -143,16 +143,16 @@ func (c *Client) GetDocumentTypes() ([]DocumentType, error) {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	c.logger.Debug("Found %d document types.", dtResponse.Count)
+	c.logger.Debug(&reqID, "Found %d document types.", dtResponse.Count)
 
 	return dtResponse.Results, nil
 }
 
-func (c *Client) GetTags() ([]Tag, error) {
+func (c *Client) GetTags(reqID string) ([]Tag, error) {
 	url := fmt.Sprintf("%s/api/tags/", c.baseURL)
 	var allTags []Tag
 
-	c.logger.Debug("Fetching tags from %s", url)
+	c.logger.Debug(&reqID, "Fetching tags from %s", url)
 	for url != "" {
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
@@ -167,7 +167,7 @@ func (c *Client) GetTags() ([]Tag, error) {
 		}
 		defer resp.Body.Close()
 
-		_, err = httputils.LogResponseBody(resp, c.logger)
+		_, err = httputils.LogResponseBody(resp, c.logger, reqID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read response body: %w", err)
 		}
@@ -185,12 +185,12 @@ func (c *Client) GetTags() ([]Tag, error) {
 		url = tagsResponse.Next
 	}
 
-	c.logger.Debug("Found %d tags.", len(allTags))
+	c.logger.Debug(&reqID, "Found %d tags.", len(allTags))
 
 	return allTags, nil
 }
 
-func (c *Client) CreateTags(newTags []string) ([]Tag, error) {
+func (c *Client) CreateTags(newTags []string, reqID string) ([]Tag, error) {
 	url := fmt.Sprintf("%s/api/tags/", c.baseURL)
 	var createdTags []Tag
 
@@ -209,7 +209,7 @@ func (c *Client) CreateTags(newTags []string) ([]Tag, error) {
 		c.setAuthHeaders(req)
 		req.Header.Set("Content-Type", "application/json")
 
-		c.logger.Debug("Creating new paperless tag: %s", string(jsonNewTag))
+		c.logger.Debug(&reqID, "Creating new paperless tag: %s", string(jsonNewTag))
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -227,7 +227,7 @@ func (c *Client) CreateTags(newTags []string) ([]Tag, error) {
 		if err := json.NewDecoder(resp.Body).Decode(&createdTag); err != nil {
 			return nil, fmt.Errorf("failed to decode created tag response: %v", err)
 		}
-		c.logger.Debug("Successfully created tag: %s (ID: %d)",
+		c.logger.Debug(&reqID, "Successfully created tag: %s (ID: %d)",
 			createdTag.Name, createdTag.ID)
 		createdTags = append(createdTags, createdTag)
 	}
@@ -235,7 +235,7 @@ func (c *Client) CreateTags(newTags []string) ([]Tag, error) {
 	return createdTags, nil
 }
 
-func (c *Client) GetCorrespondents(name *string) ([]Correspondent, error) {
+func (c *Client) GetCorrespondents(name *string, reqID string) ([]Correspondent, error) {
 	reqUrl := fmt.Sprintf("%s/api/correspondents/", c.baseURL)
 
 	if name != nil {
@@ -245,7 +245,7 @@ func (c *Client) GetCorrespondents(name *string) ([]Correspondent, error) {
 
 	var allCorrespondents []Correspondent
 
-	c.logger.Debug("Fetching correspondents from %s", reqUrl)
+	c.logger.Debug(&reqID, "Fetching correspondents from %s", reqUrl)
 
 	for reqUrl != "" {
 		req, err := http.NewRequest("GET", reqUrl, nil)
@@ -261,7 +261,7 @@ func (c *Client) GetCorrespondents(name *string) ([]Correspondent, error) {
 		}
 		defer resp.Body.Close()
 
-		_, err = httputils.LogResponseBody(resp, c.logger)
+		_, err = httputils.LogResponseBody(resp, c.logger, reqID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read response body: %w", err)
 		}
@@ -279,20 +279,20 @@ func (c *Client) GetCorrespondents(name *string) ([]Correspondent, error) {
 		reqUrl = correspondentsResponse.Next
 	}
 
-	c.logger.Debug("Found %d correspondents.", len(allCorrespondents))
+	c.logger.Debug(&reqID, "Found %d correspondents.", len(allCorrespondents))
 
 	return allCorrespondents, nil
 }
 
-func (c *Client) CreateCorrespondent(correspondent string) (*Correspondent, error) {
-	correspondents, err := c.GetCorrespondents(&correspondent)
+func (c *Client) CreateCorrespondent(correspondent string, reqID string) (*Correspondent, error) {
+	correspondents, err := c.GetCorrespondents(&correspondent, reqID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch existing correspondents: %w", err)
 	}
 
 	for _, corr := range correspondents {
 		if corr.Name == correspondent {
-			c.logger.Debug("Correspondent already exists: %s (ID: %d)", corr.Name, corr.ID)
+			c.logger.Debug(&reqID, "Correspondent already exists: %s (ID: %d)", corr.Name, corr.ID)
 			return &corr, nil
 		}
 	}
@@ -313,7 +313,7 @@ func (c *Client) CreateCorrespondent(correspondent string) (*Correspondent, erro
 	c.setAuthHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
 
-	c.logger.Debug("Creating new paperless correspondent: %s", string(jsonNewCorrespondent))
+	c.logger.Debug(&reqID, "Creating new paperless correspondent: %s", string(jsonNewCorrespondent))
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -331,13 +331,13 @@ func (c *Client) CreateCorrespondent(correspondent string) (*Correspondent, erro
 	if err := json.NewDecoder(resp.Body).Decode(&createdCorrespondent); err != nil {
 		return nil, fmt.Errorf("failed to decode created correspondent response: %v", err)
 	}
-	c.logger.Debug("Successfully created correspondent: %s (ID: %d)",
+	c.logger.Debug(&reqID, "Successfully created correspondent: %s (ID: %d)",
 		createdCorrespondent.Name, createdCorrespondent.ID)
 
 	return &createdCorrespondent, nil
 }
 
-func (c *Client) UpdateDocument(documentID int, update *DocumentUpdate) error {
+func (c *Client) UpdateDocument(documentID int, update *DocumentUpdate, reqID string) error {
 	url := fmt.Sprintf("%s/api/documents/%d/", c.baseURL, documentID)
 
 	body, err := json.Marshal(update)
@@ -353,7 +353,7 @@ func (c *Client) UpdateDocument(documentID int, update *DocumentUpdate) error {
 	c.setAuthHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
 
-	c.logger.Debug(
+	c.logger.Debug(&reqID,
 		"Updating document ID=%d, Title=%s, DocumentType=%d, Correspondent=%d, Tags=%v",
 		documentID,
 		*update.Title,
