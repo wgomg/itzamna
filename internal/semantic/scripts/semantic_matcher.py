@@ -29,6 +29,68 @@ except ImportError:
     sys.exit(1)
 
 
+class EmbeddingCache:
+    def __init__(self, model, cfg):
+        self.model = model
+        self.cache = {}
+        self.hits = 0
+        self.misses = 0
+        self.cfg = cfg
+
+    def get_embeddings(self, tags):
+        """Get embeddings for tags, computes missing ones."""
+        cached_embeddings = []
+        new_tags = []
+        request_hits = 0
+        request_misses = 0
+
+        for tag in tags:
+            if tag in self.cache:
+                cached_embeddings.append(self.cache[tag])
+                request_hits += 1
+                self.hits += 1
+            else:
+                new_tags.append(tag)
+                request_misses += 1
+                self.misses += 1
+
+        if new_tags:
+            new_embeddings = self.model.encode(
+                new_tags, normalize_embeddings=self.cfg.get("normalize_embeddings", True)
+            )
+            for tag, embedding in zip(new_tags, new_embeddings):
+                self.cache[tag] = embedding
+        else:
+            new_embeddings = np.array([])
+
+        if cached_embeddings and new_embeddings.size > 0:
+            all_embeddings = np.vstack([cached_embeddings, new_embeddings])
+        elif cached_embeddings:
+            all_embeddings = np.array(cached_embeddings)
+        else:
+            all_embeddings = new_embeddings
+
+        stats = {
+            "cache_size": len(self.cache),
+            "total_hits": self.hits,
+            "total_misses": self.misses,
+            "total_hit_rate": (
+                self.hits / (self.hits + self.misses)
+                if (self.hits + self.misses) > 0
+                else 0
+            ),
+            "request_hits": request_hits,
+            "request_misses": request_misses,
+            "request_hit_rate": (
+                request_hits / (request_hits + request_misses)
+                if (request_hits + request_misses) > 0
+                else 0
+            ),
+        }
+
+        return all_embeddings, new_tags, stats
+
+
 def load_model(model_name):
     """Load the sentence transformer model."""
     print(f"Loading model: {model_name}", file=sys.stderr)
@@ -43,16 +105,12 @@ def load_model(model_name):
         return None, 0
 
 
-def process_single_request(request, model, embedding_dim, config):
+def process_single_request(request, model, embedding_cache, config):
     """Process one request and return response."""
     start_time = time.time()
 
     text = request.get("text", "")
     existing_tags = request.get("existing_tags", [])
-
-    top_n = config.get("top_n", 15)
-    min_similarity = float(config.get("min_similarity", 0.2))
-    normalize = config.get("normalize_embeddings", True)
 
     if not text or not isinstance(text, str):
         return create_error_response("Invalid or empty text", start_time)
@@ -60,53 +118,46 @@ def process_single_request(request, model, embedding_dim, config):
     if not isinstance(existing_tags, list):
         return create_error_response("existing_tags must be a list", start_time)
 
-    existing_tags = [str(tag) for tag in existing_tags]
+    top_n = config.get("top_n", 15)
+    min_similarity = float(config.get("min_similarity", 0.2))
+    normalize = config.get("normalize_embeddings", True)
 
-    try:
-        doc_embedding = model.encode([text], normalize_embeddings=normalize)[0]
+    all_embeddings, newly_cached_tags, stats = embedding_cache.get_embeddings(
+        existing_tags
+    )
+    doc_embedding = model.encode([text], normalize_embeddings=normalize)[0]
 
-        batch_size = 100
-        similarities = []
-        for i in range(0, len(existing_tags), batch_size):
-            batch_tags = existing_tags[i:i + batch_size]
-            if batch_tags:
-                tag_embeddings = model.encode(batch_tags, normalize_embeddings=normalize)
+    similarities = []
+    for i, tag in enumerate(existing_tags):
+        similarity = float(np.dot(doc_embedding, all_embeddings[i]))
+        similarities.append({"tag": tag, "score": similarity})
 
-                for j, tag in enumerate(batch_tags):
-                    similarity = float(np.dot(doc_embedding, tag_embeddings[j]))
-                    similarities.append({"tag": tag, "score": similarity})
+    similarities.sort(key=lambda x: x["score"], reverse=True)
+    filtered = [s for s in similarities if s["score"] >= min_similarity]
+    suggested_tags = [s["tag"] for s in filtered[:top_n]]
+    top_similarities = filtered[:top_n]
 
-        similarities.sort(key=lambda x: x["score"], reverse=True)
+    processing_time = (time.time() - start_time) * 1000
 
-        filtered = [s for s in similarities if s["score"] >= min_similarity]
+    debug_info = {
+        "embedding_dimension": doc_embedding.shape[0],
+        "processing_time_ms": round(processing_time),
+        "total_tags_considered": len(existing_tags),
+        "tags_above_threshold": len(filtered),
+        "model_loaded": True,
+        "model_name": str(model),
+        "text_length_chars": len(text),
+        "text_estimated_tokens": len(text) // 4,
+        "cache_stats": stats,
+        "newly_cached_tags": len(newly_cached_tags),
+    }
 
-        suggested_tags = [s["tag"] for s in filtered[:top_n]]
-        top_similarities = filtered[:top_n]
-
-        processing_time = (time.time() - start_time) * 1000
-
-        debug_info = {
-            "embedding_dimension": embedding_dim,
-            "processing_time_ms": round(processing_time, 2),
-            "total_tags_considered": len(existing_tags),
-            "tags_above_threshold": len(filtered),
-            "model_loaded": True,
-            "model_name": str(model),
-            "text_length_chars": len(text),
-            "text_estimated_tokens": len(text) // 4,
-        }
-
-        return {
-            "suggested_tags": suggested_tags,
-            "similarities": top_similarities,
-            "debug_info": debug_info,
-            "error": None,
-        }
-
-    except Exception as e:
-        return create_error_response(
-            f"Processing error: {str(e)}", start_time, traceback.format_exc()
-        )
+    return {
+        "suggested_tags": suggested_tags,
+        "similarities": top_similarities,
+        "debug_info": debug_info,
+        "error": None,
+    }
 
 
 def create_error_response(error_msg, start_time, config, traceback_str=None):
@@ -116,7 +167,7 @@ def create_error_response(error_msg, start_time, config, traceback_str=None):
     debug_info = {
         "error": error_msg,
         "model_loaded": False,
-        "processing_time_ms": round(processing_time, 2),
+        "processing_time_ms": round(processing_time),
         "model_name": config.get("model_name", "unknown"),
         "embedding_dimension": 0,
     }
@@ -152,10 +203,12 @@ def main():
     if not model:
         sys.exit(1)
 
+    embedding_cache = EmbeddingCache(model, config)
+
     ready_msg = {"status": "ready", "embedding_dim": embedding_dim}
     print(json.dumps(ready_msg), flush=True)
 
-    print("Ready. Send JSON requests to stdin.", file=sys.stderr)
+    print("Cache initialized. Ready for requests.", file=sys.stderr)
 
     request_count = 0
     while True:
@@ -177,7 +230,7 @@ def main():
                 continue
 
             request_count += 1
-            response = process_single_request(request, model, embedding_dim, config)
+            response = process_single_request(request, model, embedding_cache, config)
 
             print(json.dumps(response), flush=True)
 

@@ -15,6 +15,7 @@ import (
 )
 
 type Task struct {
+	RequestID    string
 	Text         string
 	ExistingTags []string
 	Result       chan<- TaskResult
@@ -49,8 +50,27 @@ type PythonRequest struct {
 }
 
 type PythonResponse struct {
-	SuggestedTags []string `json:"suggested_tags"`
-	Error         string   `json:"error,omitempty"`
+	SuggestedTags []string             `json:"suggested_tags"`
+	Error         string               `json:"error,omitempty"`
+	DebugInfo     *PythonResponseDebug `json:"debug_info"`
+}
+
+type PythonResponseDebug struct {
+	ProcessingTimeMS    int                       `json:"processing_time_ms"`
+	TotalTagsConsidered int                       `json:"total_tags_considered"`
+	TagsAboveThreshold  int                       `json:"tags_above_threshold"`
+	CacheStats          *PythonResponseCacheStats `json:"cache_stats"`
+	NewlyCachedTags     int                       `json:"newly_cached_tags"`
+}
+
+type PythonResponseCacheStats struct {
+	CacheSize      int     `json:"cache_size"`
+	TotalHits      int     `json:"total_hits"`
+	TotalMisses    int     `json:"total_misses"`
+	TotalHitRate   float64 `json:"total_hit_rate"`
+	RequestHits    int     `json:"request_hits"`
+	RequestMisses  int     `json:"request_misses"`
+	RequestHitRate float64 `json:"request_hit_rate"`
 }
 
 func NewPythonMatcher(logger *utils.Logger, cfg *config.SemanticConfig) *PythonWorkerPool {
@@ -83,11 +103,16 @@ func (p *PythonWorkerPool) Initialize() error {
 	return nil
 }
 
-func (p *PythonWorkerPool) GetTagSuggestions(text string, existingTags []string) ([]string, error) {
+func (p *PythonWorkerPool) GetTagSuggestions(
+	text string,
+	existingTags []string,
+	reqID *string,
+) ([]string, error) {
 	result := make(chan TaskResult, 1)
 	task := Task{
 		Text:         text,
 		ExistingTags: existingTags,
+		RequestID:    *reqID,
 		Result:       result,
 	}
 
@@ -222,6 +247,29 @@ func (w *PythonWorker) processTask(task Task) error {
 		if resp.Error != "" {
 			return fmt.Errorf("python error: %s", resp.Error)
 		}
+
+		w.pool.logger.Info(
+			&task.RequestID,
+			"Semantic matcher stats: process_ms=%d, new_tags=%d, cache_size=%d, total_cache_hit_rate=%f",
+			resp.DebugInfo.ProcessingTimeMS,
+			resp.DebugInfo.NewlyCachedTags,
+			resp.DebugInfo.CacheStats.CacheSize,
+			resp.DebugInfo.CacheStats.TotalHitRate,
+		)
+
+		w.pool.logger.Debug(
+			&task.RequestID,
+			"Semantic matcher stats: process_ms=%d, new_tags=%d, cache_size=%d, total_cache_hits=%d, total_cache_misses=%d, total_cache_hit_rate=%f, request_cache_hits=%d request_cache_hit_misses=%d, request_cache_hit_rate=%f",
+			resp.DebugInfo.ProcessingTimeMS,
+			resp.DebugInfo.NewlyCachedTags,
+			resp.DebugInfo.CacheStats.CacheSize,
+			resp.DebugInfo.CacheStats.TotalHits,
+			resp.DebugInfo.CacheStats.TotalMisses,
+			resp.DebugInfo.CacheStats.TotalHitRate,
+			resp.DebugInfo.CacheStats.RequestHits,
+			resp.DebugInfo.CacheStats.RequestMisses,
+			resp.DebugInfo.CacheStats.RequestHitRate,
+		)
 		task.Result <- TaskResult{Tags: resp.SuggestedTags}
 		return nil
 	}

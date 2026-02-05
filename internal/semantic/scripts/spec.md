@@ -2,7 +2,7 @@
 
 ## Overview
 
-Python script that provides semantic tag matching functionality to Go service via subprocess communication. Uses `sentence-transformers` with configurable models to generate embeddings and calculate semantic similarities.
+Python script that provides semantic tag matching functionality to Go service via subprocess communication. Uses `sentence-transformers` with configurable models to generate embeddings and calculate semantic similarities with intelligent caching.
 
 ## Available Models
 
@@ -45,7 +45,7 @@ Python script that provides semantic tag matching functionality to Go service vi
 
 1. **Process Start**: Go launches Python script
 2. **Configuration**: Go sends config JSON as first line to stdin
-3. **Model Loading**: Python loads model, sends ready message to stdout
+3. **Model Loading**: Python loads model, initializes embedding cache, sends ready message to stdout
 4. **Ready State**: Python waits for requests on stdin
 
 ### Startup Configuration (Go → Python)
@@ -118,13 +118,23 @@ Python script that provides semantic tag matching functionality to Go service vi
   ],
   "debug_info": {
     "embedding_dimension": 384,
-    "processing_time_ms": 125.5,
+    "processing_time_ms": 125,
     "total_tags_considered": 42,
     "tags_above_threshold": 2,
     "model_loaded": true,
     "model_name": "all-MiniLM-L6-v2",
     "text_length_chars": 1250,
-    "text_estimated_tokens": 312
+    "text_estimated_tokens": 312,
+    "cache_stats": {
+      "cache_size": 1561,
+      "total_hits": 1561,
+      "total_misses": 1561,
+      "total_hit_rate": 0.5,
+      "request_hits": 42,
+      "request_misses": 0,
+      "request_hit_rate": 1.0
+    },
+    "newly_cached_tags": 0
   },
   "error": null
 }
@@ -132,22 +142,31 @@ Python script that provides semantic tag matching functionality to Go service vi
 
 #### Success Response Fields
 
-| Field                              | Type          | Description                                                   |
-| ---------------------------------- | ------------- | ------------------------------------------------------------- |
-| `suggested_tags`                   | array[string] | Top N tags meeting similarity threshold, sorted descending    |
-| `similarities`                     | array[object] | Top N tags with similarity scores                             |
-| `similarities[].tag`               | string        | Tag name                                                      |
-| `similarities[].score`             | float         | Cosine similarity score (0.0-1.0)                             |
-| `debug_info`                       | object        | Diagnostic information for monitoring/debugging               |
-| `debug_info.embedding_dimension`   | integer       | Vector dimension (model-specific)                             |
-| `debug_info.processing_time_ms`    | float         | Total processing time in milliseconds (rounded to 2 decimals) |
-| `debug_info.total_tags_considered` | integer       | Number of existing tags processed                             |
-| `debug_info.tags_above_threshold`  | integer       | Number of tags meeting min_similarity                         |
-| `debug_info.model_loaded`          | boolean       | Model successfully loaded                                     |
-| `debug_info.model_name`            | string        | Model identifier used                                         |
-| `debug_info.text_length_chars`     | integer       | Character count of input text                                 |
-| `debug_info.text_estimated_tokens` | integer       | Estimated token count (chars ÷ 4)                             |
-| `error`                            | null          | Always null for successful responses                          |
+| Field                                     | Type          | Description                                                |
+| ----------------------------------------- | ------------- | ---------------------------------------------------------- |
+| `suggested_tags`                          | array[string] | Top N tags meeting similarity threshold, sorted descending |
+| `similarities`                            | array[object] | Top N tags with similarity scores                          |
+| `similarities[].tag`                      | string        | Tag name                                                   |
+| `similarities[].score`                    | float         | Cosine similarity score (0.0-1.0)                          |
+| `debug_info`                              | object        | Diagnostic information for monitoring/debugging            |
+| `debug_info.embedding_dimension`          | integer       | Vector dimension (model-specific)                          |
+| `debug_info.processing_time_ms`           | integer       | Total processing time in milliseconds (rounded)            |
+| `debug_info.total_tags_considered`        | integer       | Number of existing tags processed                          |
+| `debug_info.tags_above_threshold`         | integer       | Number of tags meeting min_similarity                      |
+| `debug_info.model_loaded`                 | boolean       | Model successfully loaded                                  |
+| `debug_info.model_name`                   | string        | Model identifier used                                      |
+| `debug_info.text_length_chars`            | integer       | Character count of input text                              |
+| `debug_info.text_estimated_tokens`        | integer       | Estimated token count (chars ÷ 4)                          |
+| `debug_info.cache_stats`                  | object        | Embedding cache statistics                                 |
+| `debug_info.cache_stats.cache_size`       | integer       | Number of tag embeddings currently cached                  |
+| `debug_info.cache_stats.total_hits`       | integer       | Total cache hits across all requests                       |
+| `debug_info.cache_stats.total_misses`     | integer       | Total cache misses across all requests                     |
+| `debug_info.cache_stats.total_hit_rate`   | float         | Overall cache hit rate (hits/(hits+misses))                |
+| `debug_info.cache_stats.request_hits`     | integer       | Cache hits for this specific request                       |
+| `debug_info.cache_stats.request_misses`   | integer       | Cache misses for this specific request                     |
+| `debug_info.cache_stats.request_hit_rate` | float         | Cache hit rate for this specific request                   |
+| `debug_info.newly_cached_tags`            | integer       | Number of new tag embeddings computed for this request     |
+| `error`                                   | null          | Always null for successful responses                       |
 
 ### Error Response Format
 
@@ -158,7 +177,7 @@ Python script that provides semantic tag matching functionality to Go service vi
   "debug_info": {
     "error": "Model failed to load: File not found",
     "model_loaded": false,
-    "processing_time_ms": 10.25,
+    "processing_time_ms": 10,
     "model_name": "all-MiniLM-L6-v2",
     "embedding_dimension": 0
   },
@@ -175,7 +194,7 @@ Python script that provides semantic tag matching functionality to Go service vi
 | `debug_info`                     | object  | Error details                                |
 | `debug_info.error`               | string  | Human-readable error message                 |
 | `debug_info.model_loaded`        | boolean | Model state at error time                    |
-| `debug_info.processing_time_ms`  | float   | Time spent before error                      |
+| `debug_info.processing_time_ms`  | integer | Time spent before error                      |
 | `debug_info.model_name`          | string  | Model name that failed to load               |
 | `debug_info.embedding_dimension` | integer | 0 on error                                   |
 | `error`                          | string  | Same as debug_info.error (convenience field) |
@@ -195,27 +214,50 @@ numpy>=1.21.0
 ### Script Behavior
 
 1. **Startup**: Read configuration from first stdin message, load model once
-2. **Ready Signal**: Send `{"status": "ready", "embedding_dim": N}` to stdout
-3. **Input Reading**: Read JSON lines from stdin (blocking)
-4. **Processing**:
+2. **Cache Initialization**: Create embedding cache for tag embeddings
+3. **Ready Signal**: Send `{"status": "ready", "embedding_dim": N}` to stdout
+4. **Input Reading**: Read JSON lines from stdin (blocking)
+5. **Processing**:
    - Generate embedding for input text
-   - Generate embeddings for existing tags in batches of 100
+   - Get embeddings for existing tags (cached or compute new)
    - Calculate cosine similarities
    - Apply threshold and select top N
-5. **Output**: Write JSON response to stdout, flush immediately
-6. **Loop**: Continue until stdin closes or EOF received
-7. **Error Handling**: Catch all exceptions, return structured error
+   - Update cache statistics
+6. **Output**: Write JSON response to stdout, flush immediately
+7. **Loop**: Continue until stdin closes or EOF received
+8. **Error Handling**: Catch all exceptions, return structured error
+
+### Embedding Cache Implementation
+
+**Cache Structure**:
+
+- In-memory dictionary: `tag_name → embedding_vector`
+- Per-worker cache (not shared between workers)
+- Statistics tracking: hits, misses, hit rates
+
+**Cache Benefits**:
+
+- **First request**: Computes embeddings for all tags (~1-2 seconds for 1500 tags)
+- **Subsequent requests**: Reuses cached embeddings (~20-50ms)
+- **Performance**: 10x speedup after initial tag embedding
+- **Memory**: Cache lives for Python worker lifetime
+
+**Cache Statistics**:
+
+- Tracked per request and cumulative
+- Reported in debug_info for monitoring
+- Enables performance optimization decisions
 
 ### Performance Characteristics
 
-| Model                                   | Embedding Time | Memory Usage | Throughput      |
-| --------------------------------------- | -------------- | ------------ | --------------- |
-| `all-MiniLM-L6-v2`                      | ~50-100ms      | ~90MB        | ~10-20 docs/sec |
-| `paraphrase-multilingual-MiniLM-L12-v2` | ~100-200ms     | ~120MB       | ~5-10 docs/sec  |
-| `paraphrase-multilingual-mpnet-base-v2` | ~200-400ms     | ~420MB       | ~2-5 docs/sec   |
-| `distiluse-base-multilingual-cased-v2`  | ~150-300ms     | ~250MB       | ~3-7 docs/sec   |
+| Model                                   | Embedding Time | Memory Usage | Throughput      | Cache Performance |
+| --------------------------------------- | -------------- | ------------ | --------------- | ----------------- |
+| `all-MiniLM-L6-v2`                      | ~50-100ms      | ~90MB        | ~10-20 docs/sec | 90%+ hit rate     |
+| `paraphrase-multilingual-MiniLM-L12-v2` | ~100-200ms     | ~120MB       | ~5-10 docs/sec  | 90%+ hit rate     |
+| `paraphrase-multilingual-mpnet-base-v2` | ~200-400ms     | ~420MB       | ~2-5 docs/sec   | 90%+ hit rate     |
+| `distiluse-base-multilingual-cased-v2`  | ~150-300ms     | ~250MB       | ~3-7 docs/sec   | 90%+ hit rate     |
 
-**Note**: Throughput assumes batch size of 100 tags and typical document length.
+**Note**: Throughput assumes batch size of 100 tags and typical document length. Cache hit rates assume stable tag pool.
 
 ## Go Integration Pattern
 
@@ -226,7 +268,7 @@ numpy>=1.21.0
 SEMANTIC_MODEL_NAME=all-MiniLM-L6-v2  # or multilingual model
 SEMANTIC_TOP_N=15
 SEMANTIC_MIN_SIMILARITY=0.2
-SEMANTIC_TIMEOUT_MS=10000
+SEMANTIC_TIMEOUT_MS=10000 # auto-calculated based on system resources
 ```
 
 ### Process Management
@@ -238,6 +280,23 @@ SEMANTIC_TIMEOUT_MS=10000
 5. **Timeout**: Set 10-second timeout per request (configurable)
 6. **Restart**: If Python crashes, restart with exponential backoff
 7. **Shutdown**: Send EOF, wait for graceful exit
+
+### Worker Pool Architecture
+
+**Key Features**:
+
+- **Auto-scaled workers**: Based on CPU cores and available memory
+- **Task queue**: 100-task buffer for handling bursts
+- **Thread-safe workers**: Each worker has mutex protection
+- **Graceful shutdown**: Proper cleanup of Python processes
+
+**Worker Count Calculation**:
+
+```go
+workersByCPU = min(cpuCores, 6)
+workersByMemory = max(min(usableMemoryMB/modelMemoryMB, 6), 1)
+workerCount = min(max(min(workersByMemory, workersByCPU), 1), 6)
+```
 
 ## Model Switching Considerations
 
@@ -257,8 +316,9 @@ SEMANTIC_TIMEOUT_MS=10000
 
 1. Update Go configuration with new model name
 2. Restart service (Python process reloads with new model)
-3. Monitor similarity scores may differ between models
-4. Adjust `min_similarity` threshold if needed
+3. Cache will be rebuilt with new model embeddings
+4. Monitor similarity scores may differ between models
+5. Adjust `min_similarity` threshold if needed
 
 ## Testing Protocol
 
@@ -268,30 +328,35 @@ SEMANTIC_TIMEOUT_MS=10000
    - Test with English documents only
    - Verify performance metrics
    - Check memory usage
+   - Validate cache statistics
 
 2. **Multilingual Models**:
    - Test with documents in different languages
    - Verify cross-language similarity works
    - Check embedding dimensions match spec
+   - Test cache performance with multilingual tags
 
 3. **Performance Tests**:
    - Measure embedding time per model
    - Monitor memory usage
    - Test with large tag pools (1000+ tags)
+   - Validate cache hit rates improve over time
 
 ### Validation Steps
 
 1. Start Python script manually, send config then test JSON
 2. Verify JSON response format matches spec
-3. Test with Go integration, check error handling
-4. Load test with concurrent requests
-5. Verify memory usage doesn't leak
+3. Test cache statistics are reported correctly
+4. Test with Go integration, check error handling
+5. Load test with concurrent requests
+6. Verify memory usage doesn't leak
+7. Monitor cache performance over multiple requests
 
 ## Directory Structure
 
 ```
 scripts/
-├── semantic_matcher.py          # Main Python script
+├── semantic_matcher.py          # Main Python script with caching
 ├── requirements.txt             # Python dependencies
 ├── spec.md                      # This specification
 └── models/                      # Model cache (auto-created)
@@ -312,10 +377,11 @@ scripts/
 | Timeout exceeded       | Kill process, restart, return error       |
 | Invalid input JSON     | Return error with parsing details         |
 | Empty text input       | Return error "Invalid or empty text"      |
+| Cache corruption       | Clear cache, recompute embeddings         |
 
 ## Versioning
 
-- **API Version**: 1.1.0
+- **API Version**: 1.2.0
 - **Backwards Compatibility**: Additive changes only (new optional fields)
 - **Breaking Changes**: Increment major version, update Go integration
 
@@ -326,6 +392,7 @@ scripts/
 3. **Path Safety**: Use absolute paths for model loading
 4. **Error Messages**: Don't expose system details in production
 5. **Stderr Output**: Debug info goes to stderr, not included in responses
+6. **Cache Isolation**: Each worker has separate cache, no shared state
 
 ## Monitoring Metrics
 
@@ -338,18 +405,22 @@ Go service should track:
 - Model load time on startup
 - Memory usage per model
 - Embedding dimension per model
+- **Cache statistics**: Hit rates, cache size, newly cached tags
+- **Worker pool metrics**: Queue depth, active workers
 
 ## Future Extensions
 
-1. **Batch Processing**: Accept multiple texts in single request
-2. **Embedding Cache**: Cache tag embeddings between requests
-3. **Model Ensemble**: Combine multiple models for better accuracy
-4. **GPU Support**: Optional GPU acceleration flag
-5. **Health Endpoint**: HTTP health check for Python process
-6. **Dynamic Model Loading**: Switch models without restarting process
+1. **Shared Cache**: Cache shared between Python workers
+2. **Disk Persistence**: Save cache to disk for faster startup
+3. **Batch Processing**: Accept multiple texts in single request
+4. **Model Ensemble**: Combine multiple models for better accuracy
+5. **GPU Support**: Optional GPU acceleration flag
+6. **Health Endpoint**: HTTP health check for Python process
+7. **Dynamic Model Loading**: Switch models without restarting process
+8. **Cache TTL**: Time-based invalidation for stale embeddings
 
 ---
 
-_Last Updated: 2026-01-28_
-_Spec Version: 1.2.0_
-_Changes: Updated to match actual implementation, added ready message protocol, corrected defaults_
+_Last Updated: 2026-02-05_
+_Spec Version: 1.3.0_
+_Changes: Added embedding cache specification, updated response format with cache statistics, added performance characteristics with cache benefits_

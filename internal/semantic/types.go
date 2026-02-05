@@ -14,7 +14,7 @@ type TagSimilarity struct {
 }
 
 type Matcher interface {
-	GetTagSuggestions(text string, existingTags []string) ([]string, error)
+	GetTagSuggestions(text string, existingTags []string, reqID *string) ([]string, error)
 	HealthCheck() error
 	Close() error
 }

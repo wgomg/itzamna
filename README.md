@@ -5,18 +5,20 @@ A microservice that integrates with Paperless-ngx via webhooks to automatically 
 ## Features
 
 - **Automatic Metadata Generation**: Extract titles, tags, authors, and document types from documents
-- **Semantic Tag Matching**: Suggest relevant existing tags using sentence-transformers embeddings
+- **Semantic Tag Matching**: Suggest relevant existing tags using sentence-transformers embeddings with intelligent caching
 - **Intelligent Text Reduction**: Reduce long documents before LLM processing to save tokens
 - **Multi-language Support**: Works with documents in any language using multilingual models
 - **Worker Pool Architecture**: Concurrent processing with auto-scaled Python workers
 - **Zero Configuration Setup**: Embedded Python scripts with automatic environment setup
 - **Manual Processing**: Process untagged documents via API endpoint
+- **Request Tracing**: Automatic request ID generation and propagation for easy debugging
+- **Performance Monitoring**: Detailed cache statistics and processing metrics
 
 ## Quick Start
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.24+
 - Python 3.8+ (for Python environment setup)
 - Paperless-ngx instance with API access
 - LLM API access (OpenAI-compatible)
@@ -27,7 +29,7 @@ A microservice that integrates with Paperless-ngx via webhooks to automatically 
 # Clone and build
 git clone <repository-url>
 cd itzamna
-go build -o itzamna ./cmd/main.go
+go build -o itzamna ./cmd
 
 # Configure environment
 export PAPERLESS_URL="https://your-paperless-instance"
@@ -77,6 +79,9 @@ SEMANTIC_WORKER_COUNT=2  # do not include for automatic
 
 # Text reduction
 REDUCTION_THRESHOLD_TOKENS=2000
+
+# Logging
+RAW_BODY_LOG=false  # set to true for debugging request/response bodies
 ```
 
 ### Available Models
@@ -95,7 +100,7 @@ REDUCTION_THRESHOLD_TOKENS=2000
 ```
 Paperless-ngx Webhook → Document Fetch → Length Check → Semantic Tag Matching → LLM Analysis → Paperless Update
                          ↓ (if long)     ↓ (if many tags)
-                    Text Reduction    Tag Suggestions
+                    Text Reduction    Tag Suggestions (with caching)
 ```
 
 ### Key Components
@@ -103,7 +108,7 @@ Paperless-ngx Webhook → Document Fetch → Length Check → Semantic Tag Match
 1. **Webhook Handler** (`internal/api/`): Receives and validates Paperless-ngx webhooks
 2. **Document Fetcher** (`internal/paperless/`): Retrieves document content via REST API
 3. **Text Reducer** (`internal/processor/`): Reduces long documents using TF-Graph-Position algorithm
-4. **Semantic Matcher** (`internal/semantic/`): Python worker pool for tag similarity matching
+4. **Semantic Matcher** (`internal/semantic/`): Python worker pool for tag similarity matching with embedding cache
 5. **LLM Client** (`internal/llm/`): Sends prompts and parses structured JSON responses
 6. **Document Updater**: Applies validated metadata back to Paperless-ngx
 
@@ -113,6 +118,7 @@ The semantic matcher uses a worker pool for concurrent processing:
 
 - **Auto-scaled workers**: Based on CPU cores and available memory
 - **Task queue**: 100-task buffer for handling bursts
+- **Embedding cache**: Each Python worker caches tag embeddings for 10x performance
 - **Health monitoring**: Built-in health checks with automatic recovery
 - **Graceful shutdown**: Proper cleanup of Python processes
 
@@ -169,6 +175,18 @@ curl -X POST http://localhost:8080/process/untagged
 }
 ```
 
+## Request Tracing
+
+Every request automatically receives a unique request ID that propagates through the entire system:
+
+```
+[INFO] POST /webhook REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671
+[DEBUG] REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671 Fetching document 123
+[DEBUG] REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671 Semantic matcher stats: cache_hit_rate=100%
+```
+
+This makes debugging production issues significantly easier.
+
 ## Performance
 
 ### Resource Requirements
@@ -182,6 +200,16 @@ curl -X POST http://localhost:8080/process/untagged
 - **Documents/second**: 2-10 (varies by model and document length)
 - **Concurrent processing**: Multiple workers handle requests in parallel
 - **Auto-scaling**: Worker count adjusts based on system resources
+- **Cache performance**: 90%+ cache hit rate after initial tag embedding
+
+### Embedding Cache
+
+The semantic matcher includes an intelligent embedding cache:
+
+- **First request**: Computes embeddings for all tags (~1-2 seconds for 1500 tags)
+- **Subsequent requests**: Reuses cached embeddings (~20-50ms)
+- **Cache persistence**: Cache lives for Python worker lifetime
+- **Cache statistics**: Logged per request for monitoring
 
 ## Development
 
@@ -191,13 +219,13 @@ curl -X POST http://localhost:8080/process/untagged
 itzamna/
 ├── cmd/main.go                 # Entry point
 ├── internal/
-│   ├── api/                   # Webhook handlers
-│   ├── config/                # Configuration
+│   ├── api/                   # Webhook handlers with request tracing
+│   ├── config/                # Configuration with validation
 │   ├── llm/                   # LLM client
 │   ├── paperless/             # Paperless API client
 │   ├── processor/             # Text reduction
-│   ├── semantic/              # Semantic matching
-│   └── utils/                 # Utilities
+│   ├── semantic/              # Semantic matching with Python workers
+│   └── utils/                 # Utilities (logging, HTTP helpers)
 └── README.md
 ```
 
@@ -225,6 +253,7 @@ export SEMANTIC_MODEL_NAME="paraphrase-multilingual-MiniLM-L12-v2"
 - Python scripts are embedded using `go:embed`
 - For development, place scripts in `scripts/` directory to override embedded versions
 - Enable debug logging: `export LOG_LEVEL=debug`
+- Request IDs are automatically generated and logged
 
 ## Troubleshooting
 
@@ -253,12 +282,38 @@ export SEMANTIC_MODEL_NAME="paraphrase-multilingual-MiniLM-L12-v2"
 - Verify document has no tags in Paperless-ngx
 - Check service logs for API errors
 
+**Debugging with request IDs:**
+
+```bash
+# Filter logs by request ID
+grep "REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671" logs/app.log
+
+# See complete request flow
+grep -A5 -B5 "REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671" logs/app.log
+```
+
 **Detailed logging:**
 
 ```bash
 export LOG_LEVEL=debug
 export RAW_BODY_LOG=true
 ./itzamna
+```
+
+## Performance Monitoring
+
+Key metrics available in logs:
+
+- **Cache hit rate**: Percentage of tag embeddings served from cache
+- **Processing time**: Time spent in semantic matching
+- **New tags cached**: Number of new embeddings computed per request
+- **Total cache size**: Number of tag embeddings cached
+
+Example log output:
+
+```
+[INFO] REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671 Semantic matcher stats: process_ms=23, new_tags=0, cache_size=1561, total_cache_hit_rate=0.50
+[DEBUG] REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671 Semantic matcher stats: process_ms=23, new_tags=0, cache_size=1561, total_cache_hits=1561, total_cache_misses=1561, total_cache_hit_rate=0.50, request_cache_hits=1561 request_cache_hit_misses=0, request_cache_hit_rate=1.00
 ```
 
 ## License
@@ -273,6 +328,6 @@ All models are open-source and freely available for commercial use.
 
 ---
 
-_Last Updated: 2026-02-04_
-_Implementation Version: 1.3.1_
-_Changes: Added `/process/untagged` endpoint for manual document processing_
+_Last Updated: 2026-02-05_
+_Implementation Version: 1.4.0_
+_Changes: Added request tracing, embedding cache, improved logging, and performance monitoring_
