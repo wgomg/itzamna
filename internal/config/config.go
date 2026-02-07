@@ -204,10 +204,10 @@ func calculateDefaultWorkerCount() int {
 
 func getLogLevel(env Environment) string {
 	if env == Production {
-		return getEnv("LOG_LEVEL", "info")
+		return getEnv("APP_LOG_LEVEL", "info")
 	}
 
-	return getEnv("LOG_LEVEL", "debug")
+	return getEnv("APP_LOG_LEVEL", "debug")
 }
 
 func getEnv(key, defaultValue string) string {
