@@ -4,16 +4,17 @@
 
 ### System Design
 
-The Document Processing Service is built as a Go microservice with an embedded Python component for semantic matching. The architecture follows a pipeline pattern where documents flow through sequential processing stages.
+The Document Processing Service is built as a Go microservice with an embedded Python component for semantic matching. The architecture follows a pipeline pattern where documents flow through sequential processing stages with intelligent caching and performance optimizations.
 
 ### Core Design Principles
 
 1. **Separation of Concerns**: Each component has a single responsibility
 2. **Concurrency First**: Designed for parallel processing from the ground up
-3. **Resource Efficiency**: Optimized for low-resource environments
+3. **Resource Efficiency**: Optimized for low-resource environments with intelligent caching
 4. **Extensibility**: Interfaces and factories allow for easy component replacement
 5. **Manual Recovery**: Support for processing missed documents via API
 6. **Observability**: Automatic request tracing and detailed logging
+7. **Performance Optimization**: Cache warm-up at startup for optimal first-request performance
 
 ## Component Architecture
 
@@ -132,7 +133,7 @@ type Graph struct {
 
 ### 5. Semantic Matcher (`internal/semantic/`)
 
-**Purpose**: Find semantically similar tags using sentence-transformers with intelligent caching
+**Purpose**: Find semantically similar tags using sentence-transformers with intelligent caching and warm-up optimization
 
 #### Worker Pool Architecture
 
@@ -142,6 +143,8 @@ type Graph struct {
 - Buffered task queue (100 tasks)
 - Automatic worker lifecycle management
 - Health monitoring and recovery
+- **Sequential warm-up**: Workers initialized sequentially to prevent CPU spikes
+- **Blocking initialization**: Service waits for all workers to be ready before accepting requests
 
 **PythonWorker**:
 
@@ -156,6 +159,7 @@ type Graph struct {
 - **Performance**: 10x speedup after initial tag embedding
 - **Statistics**: Track hits/misses for monitoring
 - **Persistence**: Cache lives for Python worker lifetime
+- **Warm-up**: Pre-loaded at startup for optimal first-request performance
 
 **Communication Protocol**:
 
@@ -174,6 +178,8 @@ Python → Go: {"suggested_tags": [...], "cache_stats": {...}, "error": null}\n
 2. Create Python virtual environment
 3. Install dependencies (`sentence-transformers`, `torch`, `numpy`)
 4. Start worker processes
+5. **Cache Warm-up**: Pre-load all Paperless tags into embedding caches
+6. **Sequential Initialization**: Warm up workers sequentially to avoid CPU spikes
 
 **Development Mode**:
 Place scripts in `scripts/` directory to override embedded versions:
@@ -210,6 +216,54 @@ prompt := fmt.Sprintf(
 - Structured JSON parsing with validation
 - Token usage tracking
 - Error handling for malformed responses
+
+### 7. Tags Cache (`internal/utils/cache.go`)
+
+**Purpose**: Thread-safe cache for Paperless tags with batch operations
+
+**Key Features**:
+
+- **Thread-safe**: Uses `sync.RWMutex` for concurrent access
+- **Batch operations**: `GetMissingAndAdd()` for efficient bulk updates
+- **Hit rate tracking**: Monitor cache effectiveness
+- **Warm-up support**: Pre-loaded at startup with all Paperless tags
+- **Performance**: Atomic operations combine get and set for efficiency
+
+**Cache Architecture**:
+
+```go
+type TagsCache struct {
+    mu     sync.RWMutex
+    items  map[string]CacheItem
+    hits   int
+    misses int
+}
+
+func (c *TagsCache) GetMissingAndAdd(keys []string) []string {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+
+    missing := []string{}
+    for _, key := range keys {
+        if _, exists := c.items[key]; !exists {
+            missing = append(missing, key)
+            c.misses += 1
+            c.items[key] = CacheItem{
+                value:      key,
+                lastAccess: time.Now(),
+                hits:       0,
+            }
+        } else {
+            c.hits += 1
+            item := c.items[key]
+            item.hits += 1
+            item.lastAccess = time.Now()
+            c.items[key] = item
+        }
+    }
+    return missing
+}
+```
 
 ## API Endpoints
 
@@ -251,10 +305,17 @@ for _, document := range documents {
 **Worker Pool Pattern**:
 
 ```go
-// Python worker pool
-for i := 0; i < cfg.WorkerCount; i++ {
+// Python worker pool with sequential warm-up
+for i := 0; i < cfg.Semantic.WorkerCount; i++ {
     p.wg.Add(1)
-    go p.runWorker(i)
+    go p.runWorker(i, readyCh)
+}
+
+// Wait for all workers to be ready
+for i := 0; i < cfg.Semantic.WorkerCount; i++ {
+    if err := <-readyCh; err != nil {
+        return fmt.Errorf("worker failed to start: %w", err)
+    }
 }
 ```
 
@@ -298,6 +359,22 @@ func (p *PythonWorkerPool) Close() error {
 }
 ```
 
+**Cache Synchronization**:
+
+```go
+type TagsCache struct {
+    mu     sync.RWMutex
+    items  map[string]CacheItem
+    // ...
+}
+
+func (c *TagsCache) GetMissingAndAdd(keys []string) []string {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    // Thread-safe batch operations
+}
+```
+
 ## Error Handling Strategy
 
 ### Layered Error Handling
@@ -316,6 +393,7 @@ func (p *PythonWorkerPool) Close() error {
    - Python process failures
    - Network timeouts
    - Resource exhaustion
+   - Cache warm-up failures
 
 ### Batch Processing Error Handling
 
@@ -344,6 +422,23 @@ response := map[string]interface{}{
 }
 if failed > 0 {
     response["failed_document_ids"] = failedIDs
+}
+```
+
+### Cache Warm-up Error Handling
+
+**Startup Failures**:
+
+```go
+// Sequential warm-up with individual error handling
+for i := 0; i < cfg.Semantic.WorkerCount; i++ {
+    _, err := semanticMatcher.GetTagSuggestions("dummy", cachedTags, workerReqId)
+    if err != nil {
+        logger.Fatal(
+            fmt.Sprintf("Failed to warm up semantic embedding cache for worker %d:", workerId),
+            err,
+        )
+    }
 }
 ```
 
@@ -415,6 +510,7 @@ func Load() (*Config, error) {
 # Test individual packages
 go test ./internal/processor/...
 go test ./internal/config/...
+go test ./internal/utils/...  # Cache tests
 ```
 
 **Integration Tests**:
@@ -447,6 +543,14 @@ curl -X POST http://localhost:8080/process/untagged
 export SEMANTIC_WORKER_COUNT=2
 export LOG_LEVEL=debug
 ./itzamna
+```
+
+**Cache Warm-up Testing**:
+
+```bash
+# Monitor startup logs for cache warm-up
+export LOG_LEVEL=info
+./itzamna 2>&1 | grep -E "(Warming up|warmed up|Cache)"
 ```
 
 ## Development Workflow
@@ -504,6 +608,16 @@ export SEMANTIC_WORKER_COUNT=1  # Easier to debug single worker
 - All logs include `REQID=` prefix
 - Filter logs by request ID: `grep "REQID=abc123" logs/app.log`
 - Trace complete request flow across components
+
+**Cache Performance Monitoring**:
+
+```bash
+# Monitor cache hit rates
+grep -E "(Tags Cache|HitRate)" logs/app.log
+
+# Monitor warm-up progress
+grep -E "(Warming up|warmed up)" logs/app.log
+```
 
 **Performance Profiling**:
 
@@ -597,6 +711,26 @@ func (h *Handler) HandleProcessUnauthored(w http.ResponseWriter, r *http.Request
 }
 ```
 
+### Cache Customization
+
+**Implement Custom Cache Strategy**:
+
+```go
+type CacheStrategy interface {
+    GetMissingAndAdd(keys []string) []string
+    Size() int
+    HitRate() float64
+    ResetStats()
+}
+
+func NewLRUCache(maxSize int) CacheStrategy {
+    return &lruCache{
+        maxSize: maxSize,
+        items:   make(map[string]CacheItem),
+    }
+}
+```
+
 ## Performance Considerations
 
 ### Memory Management
@@ -606,12 +740,14 @@ func (h *Handler) HandleProcessUnauthored(w http.ResponseWriter, r *http.Request
 - Each worker loads model into memory (~90-420MB)
 - Worker count auto-calculated based on available memory
 - Consider smaller models for memory-constrained environments
+- **Cache memory**: Each worker caches tag embeddings (~4KB per tag)
 
 **Go Service**:
 
 - Document content stored in memory during processing
 - Consider streaming for very large documents
 - Implement LRU cache for frequent operations
+- **Tags cache**: Minimal memory overhead (string storage only)
 
 ### CPU Utilization
 
@@ -620,12 +756,14 @@ func (h *Handler) HandleProcessUnauthored(w http.ResponseWriter, r *http.Request
 - Default: 1-6 workers based on CPU cores
 - Adjust based on workload characteristics
 - Monitor CPU usage under load
+- **Sequential warm-up**: Prevents CPU spikes during startup
 
 **Batch Processing**:
 
 - Consider batching similar operations
 - Implement request coalescing for identical documents
 - Use connection pooling for HTTP clients
+- **Cache operations**: Batch `GetMissingAndAdd()` reduces lock contention
 
 ### I/O Optimization
 
@@ -647,6 +785,21 @@ httpClient := &http.Client{
 - Cache extracted Python scripts
 - Reuse virtual environment across restarts
 - Implement retry logic for network operations
+
+### Cache Performance
+
+**Warm-up Benefits**:
+
+- **First request**: ~20-50ms (embeddings already cached)
+- **Without warm-up**: ~1-2 seconds (computes all tag embeddings)
+- **Memory trade-off**: Cache lives in Python worker memory
+- **Startup time**: Additional 1-2 seconds for warm-up
+
+**Batch Operations**:
+
+- `GetMissingAndAdd()` combines get and set operations
+- Reduces lock contention compared to individual operations
+- Improves throughput for bulk tag processing
 
 ## Security Considerations
 
@@ -678,6 +831,20 @@ httpClient := &http.Client{
 - Certificate validation
 - Firewall rules for service ports
 
+### Cache Security
+
+**Data Isolation**:
+
+- Each Python worker has separate cache
+- No shared state between workers
+- Cache cleared on worker restart
+
+**Memory Limits**:
+
+- Worker count limited by available memory
+- Model size considered in worker calculation
+- Cache size grows with tag count
+
 ## Monitoring and Observability
 
 ### Logging Strategy
@@ -702,14 +869,37 @@ logger.Error(&reqID, "Error processing untagged document ID=%d: %v", document.ID
 **Cache Statistics**:
 
 ```go
-logger.Info(&reqID, "Semantic matcher stats: process_ms=%d, new_tags=%d, cache_size=%d, total_cache_hit_rate=%f",
-    processingTimeMS, newlyCachedTags, cacheSize, totalHitRate)
+logger.Info(
+    &reqID,
+    "Tags Cache: size=%d, new=%d, hit_rate=%f",
+    h.tagsCache.Size(),
+    len(newTags),
+    h.tagsCache.HitRate(),
+)
+```
+
+**Warm-up Progress**:
+
+```go
+logger.Info(
+    &workerReqId,
+    "Warming up semantic matcher worker %d/%d",
+    workerId,
+    cfg.Semantic.WorkerCount,
+)
+
+logger.Info(
+    &workerReqId,
+    "Worker %d/%d warmed up successfully",
+    workerId,
+    cfg.Semantic.WorkerCount,
+)
 ```
 
 **Log Levels**:
 
 - `debug`: Detailed processing information, cache statistics
-- `info`: Normal operation events, request tracing
+- `info`: Normal operation events, request tracing, warm-up progress
 - `error`: Error conditions
 
 ### Metrics Collection
@@ -724,6 +914,8 @@ logger.Info(&reqID, "Semantic matcher stats: process_ms=%d, new_tags=%d, cache_s
 - Manual processing success/failure rates
 - **Cache hit rates**: Total and per-request
 - **Cache size**: Number of embeddings cached
+- **Warm-up time**: Time spent warming up workers
+- **Worker readiness**: Time to initialize all workers
 
 **Health Checks**:
 
@@ -733,6 +925,13 @@ func (p *PythonWorkerPool) HealthCheck() error {
     return nil
 }
 ```
+
+**Performance Benchmarks**:
+
+- First request latency (with/without warm-up)
+- Cache hit rate over time
+- Memory usage per worker
+- Startup time with cache warm-up
 
 ## Deployment Considerations
 
@@ -773,6 +972,7 @@ resources:
 - Stateless design allows horizontal scaling
 - Load balancer for webhook distribution
 - Shared-nothing architecture
+- **Cache independence**: Each instance warms up its own cache
 
 **Graceful Shutdown**:
 
@@ -785,6 +985,15 @@ func (p *PythonWorkerPool) Close() error {
 }
 ```
 
+**Startup Sequence**:
+
+1. Configuration validation
+2. Client initialization (Paperless, LLM)
+3. Python worker pool setup
+4. Cache warm-up (sequential)
+5. Server start
+6. Health check readiness
+
 ## Future Development
 
 ### Planned Enhancements
@@ -793,26 +1002,56 @@ func (p *PythonWorkerPool) Close() error {
    - Shared cache between Python workers
    - Disk persistence for faster startup
    - TTL-based invalidation for stale embeddings
+   - Compression for memory efficiency
 
 2. **Batch Processing**:
    - Process multiple documents in single Python request
    - Implement request batching for efficiency
    - Optimize for bulk operations
+   - Parallel document processing
 
 3. **Model Management**:
    - Dynamic model loading/unloading
    - Model versioning
    - A/B testing for model selection
+   - Model performance monitoring
 
 4. **Native Go Implementation**:
    - Replace Python with ONNX runtime
    - Pure Go tensor operations
    - Reduced memory footprint
+   - Faster startup time
 
 5. **Enhanced Manual Processing**:
    - More filter options (by date, document type, etc.)
    - Progress tracking for long-running batch jobs
    - Scheduled automatic cleanup of missed documents
+   - Priority-based processing queues
+
+6. **Cache Optimization**:
+   - Adaptive warm-up based on tag count
+   - Background cache refresh
+   - Cache sharing between instances
+   - Predictive pre-warming
+
+### Research Areas
+
+1. **Embedding Quality**:
+   - Model comparison for different document types
+   - Fine-tuning for domain-specific documents
+   - Multi-modal embeddings (text + metadata)
+
+2. **Performance Optimization**:
+   - GPU acceleration for embedding generation
+   - Quantized models for reduced memory
+   - Streaming document processing
+   - Edge deployment optimizations
+
+3. **Intelligent Processing**:
+   - Learning from user corrections
+   - Adaptive threshold tuning
+   - Document clustering for batch processing
+   - Predictive tagging based on document history
 
 ## API Reference Updates
 
@@ -857,6 +1096,18 @@ Content-Type: application/json
 - Individual document failures don't stop batch processing
 - Failed document IDs are returned in response
 
+### Cache Warm-up Endpoint (Future)
+
+**Potential Endpoint**: `POST /cache/warmup`
+
+**Purpose**: Manually trigger cache warm-up without restarting service
+
+**Use Cases**:
+
+- After adding many new tags
+- When switching models
+- Performance tuning
+
 ## Code Organization Patterns
 
 ### Shared Processing Logic
@@ -900,9 +1151,58 @@ func requestMiddleware(handler *Handler, next http.Handler) http.Handler {
 - Automatically included in all log messages
 - Enables end-to-end request tracing
 
+### Cache Integration Pattern
+
+**Dependency Injection**:
+
+```go
+func NewHandler(
+    logger *utils.Logger,
+    paperless *paperless.Client,
+    llm *llm.Client,
+    semanticMatcher semantic.Matcher,
+    cfg *config.Config,
+    tagsCache *utils.TagsCache,  // Cache injected as dependency
+) *Handler {
+    return &Handler{
+        logger:          logger,
+        paperless:       paperless,
+        llm:             llm,
+        semanticMatcher: semanticMatcher,
+        cfg:             cfg,
+        tagsCache:       tagsCache,
+    }
+}
+```
+
+**Batch Cache Operations**:
+
+```go
+// Efficient batch operation
+newTags := h.tagsCache.GetMissingAndAdd(suggestedTags)
+
+// Log cache statistics
+h.logger.Info(
+    &reqID,
+    "Tags Cache: size=%d, new=%d, hit_rate=%f",
+    h.tagsCache.Size(),
+    len(newTags),
+    h.tagsCache.HitRate(),
+)
+```
+
 ## Version History
 
-### v1.4.0 (Current)
+### v1.5.0 (Current)
+
+- **Cache Warm-up**: Pre-loads tag embeddings at startup for optimal first-request performance
+- **Batch Cache Operations**: Efficient `GetMissingAndAdd()` method for bulk cache updates
+- **Sequential Worker Initialization**: Workers warmed up sequentially to prevent CPU spikes
+- **Blocking Initialization**: Service waits for all workers to be ready before accepting requests
+- **Improved Startup Performance**: Detailed warm-up progress logging and monitoring
+- **Enhanced Cache Statistics**: Better tracking of cache effectiveness and hit rates
+
+### v1.4.0
 
 - **Request Tracing**: Automatic UUID generation and propagation for all requests
 - **Embedding Cache**: Intelligent in-memory cache for tag embeddings with 10x performance improvement
@@ -934,9 +1234,65 @@ func requestMiddleware(handler *Handler, next http.Handler) http.Handler {
 - **Semantic Matching**: Embedded Python with all-MiniLM-L6-v2 model
 - **LLM Integration**: Structured metadata extraction via LLM API
 
+## Migration Guide
+
+### Upgrading from v1.4.0 to v1.5.0
+
+**Backward Compatibility**:
+
+- All existing APIs remain unchanged
+- Configuration format unchanged
+- No data migration required
+
+**Performance Impact**:
+
+- **Startup time**: Increased by 1-2 seconds for cache warm-up
+- **First request**: Significantly faster (20-50ms vs 1-2 seconds)
+- **Memory usage**: Slight increase due to pre-loaded embeddings
+- **CPU usage**: More controlled during startup (sequential warm-up)
+
+**Configuration Considerations**:
+
+- No new environment variables required
+- Existing worker count calculation unchanged
+- Cache warm-up is automatic and non-configurable
+
+**Monitoring Changes**:
+
+- New log messages for warm-up progress
+- Enhanced cache statistics
+- Better startup performance tracking
+
+### Deployment Recommendations
+
+**Production Deployment**:
+
+1. Test with development environment first
+2. Monitor startup logs for warm-up completion
+3. Verify first request performance improvement
+4. Check memory usage with pre-loaded embeddings
+5. Monitor cache hit rates during normal operation
+
+**Resource Planning**:
+
+- Ensure sufficient memory for embedding cache
+- Consider tag count when estimating memory needs
+- Monitor CPU during warm-up phase
+- Plan for slightly longer startup time
+
+**Rollback Strategy**:
+
+- Keep previous version available
+- Monitor key metrics after upgrade
+- Have rollback plan if performance degrades
+- Test with representative document load
+
 ---
 
 _This documentation is maintained alongside the codebase. For the latest information, refer to the source code and inline comments._
 
 _Last Updated: 2026-02-05_
-_Implementation Version: 1.4.0_
+
+_Implementation Version: 1.5.0_
+
+_Changes: Added cache warm-up at startup, batch cache operations, sequential worker initialization, improved startup performance monitoring, and enhanced documentation for performance optimizations_
