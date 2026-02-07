@@ -82,9 +82,17 @@ func (p *PythonWorkerPool) Initialize() error {
 		return fmt.Errorf("failed to setup environment: %w", err)
 	}
 
+	readyCh := make(chan error, p.cfg.WorkerCount)
+
 	for i := 0; i < p.cfg.WorkerCount; i++ {
 		p.wg.Add(1)
-		go p.runWorker(i)
+		go p.runWorker(i, readyCh)
+	}
+
+	for i := 0; i < p.cfg.WorkerCount; i++ {
+		if err := <-readyCh; err != nil {
+			return fmt.Errorf("worker failed to start: %w", err)
+		}
 	}
 
 	p.logger.Info(nil, "Python semantic matcher initialized successfully")
@@ -94,13 +102,13 @@ func (p *PythonWorkerPool) Initialize() error {
 func (p *PythonWorkerPool) GetTagSuggestions(
 	text string,
 	newTags []string,
-	reqID *string,
+	reqID string,
 ) ([]string, error) {
 	result := make(chan TaskResult, 1)
 	task := Task{
 		Text:      text,
 		NewTags:   newTags,
-		RequestID: *reqID,
+		RequestID: reqID,
 		Result:    result,
 	}
 
@@ -110,14 +118,18 @@ func (p *PythonWorkerPool) GetTagSuggestions(
 	return res.Tags, res.Err
 }
 
-func (p *PythonWorkerPool) runWorker(id int) {
+func (p *PythonWorkerPool) runWorker(id int, readyCh chan<- error) {
 	defer p.wg.Done()
 
 	worker, err := p.startWorker(id)
 	if err != nil {
 		p.logger.Error(nil, "Failed to start worker %d: %v", id, err)
+		readyCh <- err
 		return
 	}
+
+	readyCh <- nil
+
 	defer worker.close()
 
 	for task := range p.taskQueue {

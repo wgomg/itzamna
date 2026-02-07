@@ -33,6 +33,7 @@ func NewHandler(
 	llm *llm.Client,
 	semanticMatcher semantic.Matcher,
 	cfg *config.Config,
+	tagsCache *utils.TagsCache,
 ) *Handler {
 	return &Handler{
 		logger:          logger,
@@ -40,7 +41,7 @@ func NewHandler(
 		llm:             llm,
 		semanticMatcher: semanticMatcher,
 		cfg:             cfg,
-		tagsCache:       utils.NewTagsCache(),
+		tagsCache:       tagsCache,
 	}
 }
 
@@ -217,7 +218,7 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 	)
 
 	if len(suggestedTags) > h.cfg.Semantic.TagsThreshold {
-		suggestedTags, err = h.semanticMatcher.GetTagSuggestions(llmContent, newTags, &reqID)
+		suggestedTags, err = h.semanticMatcher.GetTagSuggestions(llmContent, newTags, reqID)
 		if err != nil {
 			h.logger.Error(&reqID, "Failed to get semantic tag suggestions: %v", err)
 			return err

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/wgomg/itzamna/internal/api"
@@ -45,7 +46,52 @@ func main() {
 	}
 	defer semanticMatcher.Close()
 
-	apihandler := api.NewHandler(logger, paperlessClient, llmClient, semanticMatcher, cfg)
+	tagsCache := utils.NewTagsCache()
+	warmReqId := "warm-up"
+	tags, err := paperlessClient.GetTags(warmReqId)
+	if err != nil {
+		logger.Fatal("Failed to fetch tags:", err)
+	}
+	initialTags := make([]string, len(tags))
+	for i, t := range tags {
+		initialTags[i] = t.Name
+	}
+	cachedTags := tagsCache.GetMissingAndAdd(initialTags)
+	for i := 0; i < cfg.Semantic.WorkerCount; i++ {
+		workerId := i + 1
+		workerReqId := fmt.Sprintf("%s-%d", warmReqId, workerId)
+
+		logger.Info(
+			&workerReqId,
+			"Warming up semantic matcher worker %d/%d",
+			workerId,
+			cfg.Semantic.WorkerCount,
+		)
+
+		_, err := semanticMatcher.GetTagSuggestions("dummy", cachedTags, workerReqId)
+		if err != nil {
+			logger.Fatal(
+				fmt.Sprintf("Failed to warm up semantic embedding cache for worker %d:", workerId),
+				err,
+			)
+		}
+
+		logger.Info(
+			&workerReqId,
+			"Worker %d/%d warmed up successfully",
+			workerId,
+			cfg.Semantic.WorkerCount,
+		)
+	}
+
+	apihandler := api.NewHandler(
+		logger,
+		paperlessClient,
+		llmClient,
+		semanticMatcher,
+		cfg,
+		tagsCache,
+	)
 
 	mux := api.RegisterRoutes(apihandler)
 
