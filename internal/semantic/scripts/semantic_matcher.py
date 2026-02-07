@@ -33,62 +33,19 @@ class EmbeddingCache:
     def __init__(self, model, cfg):
         self.model = model
         self.cache = {}
-        self.hits = 0
-        self.misses = 0
         self.cfg = cfg
 
-    def get_embeddings(self, tags):
+    def get_embeddings(self, new_tags):
         """Get embeddings for tags, computes missing ones."""
-        cached_embeddings = []
-        new_tags = []
-        request_hits = 0
-        request_misses = 0
-
-        for tag in tags:
-            if tag in self.cache:
-                cached_embeddings.append(self.cache[tag])
-                request_hits += 1
-                self.hits += 1
-            else:
-                new_tags.append(tag)
-                request_misses += 1
-                self.misses += 1
-
-        if new_tags:
+        if len(new_tags) > 0:
             new_embeddings = self.model.encode(
                 new_tags, normalize_embeddings=self.cfg.get("normalize_embeddings", True)
             )
-            for tag, embedding in zip(new_tags, new_embeddings):
-                self.cache[tag] = embedding
-        else:
-            new_embeddings = np.array([])
 
-        if cached_embeddings and new_embeddings.size > 0:
-            all_embeddings = np.vstack([cached_embeddings, new_embeddings])
-        elif cached_embeddings:
-            all_embeddings = np.array(cached_embeddings)
-        else:
-            all_embeddings = new_embeddings
+            for i, nt in enumerate(new_tags):
+                self.cache[nt] = new_embeddings[i]
 
-        stats = {
-            "cache_size": len(self.cache),
-            "total_hits": self.hits,
-            "total_misses": self.misses,
-            "total_hit_rate": (
-                self.hits / (self.hits + self.misses)
-                if (self.hits + self.misses) > 0
-                else 0
-            ),
-            "request_hits": request_hits,
-            "request_misses": request_misses,
-            "request_hit_rate": (
-                request_hits / (request_hits + request_misses)
-                if (request_hits + request_misses) > 0
-                else 0
-            ),
-        }
-
-        return all_embeddings, new_tags, stats
+        return self.cache
 
 
 def load_model(model_name):
@@ -110,26 +67,26 @@ def process_single_request(request, model, embedding_cache, config):
     start_time = time.time()
 
     text = request.get("text", "")
-    existing_tags = request.get("existing_tags", [])
+    new_tags = request.get("new_tags", [])
 
     if not text or not isinstance(text, str):
-        return create_error_response("Invalid or empty text", start_time)
+        return create_error_response("Invalid or empty text", start_time, config)
 
-    if not isinstance(existing_tags, list):
-        return create_error_response("existing_tags must be a list", start_time)
+    if not isinstance(new_tags, list):
+        return create_error_response(
+            f"new_tags must be a list, received: {new_tags}", start_time, config
+        )
 
     top_n = config.get("top_n", 15)
     min_similarity = float(config.get("min_similarity", 0.2))
     normalize = config.get("normalize_embeddings", True)
 
-    all_embeddings, newly_cached_tags, stats = embedding_cache.get_embeddings(
-        existing_tags
-    )
+    all_embeddings = embedding_cache.get_embeddings(new_tags)
     doc_embedding = model.encode([text], normalize_embeddings=normalize)[0]
 
     similarities = []
-    for i, tag in enumerate(existing_tags):
-        similarity = float(np.dot(doc_embedding, all_embeddings[i]))
+    for tag, embeddings in all_embeddings.items():
+        similarity = float(np.dot(doc_embedding, embeddings))
         similarities.append({"tag": tag, "score": similarity})
 
     similarities.sort(key=lambda x: x["score"], reverse=True)
@@ -142,14 +99,12 @@ def process_single_request(request, model, embedding_cache, config):
     debug_info = {
         "embedding_dimension": doc_embedding.shape[0],
         "processing_time_ms": round(processing_time),
-        "total_tags_considered": len(existing_tags),
+        "total_tags_considered": len(all_embeddings),
         "tags_above_threshold": len(filtered),
         "model_loaded": True,
         "model_name": str(model),
         "text_length_chars": len(text),
         "text_estimated_tokens": len(text) // 4,
-        "cache_stats": stats,
-        "newly_cached_tags": len(newly_cached_tags),
     }
 
     return {
@@ -225,7 +180,9 @@ def main():
             try:
                 request = json.loads(line)
             except json.JSONDecodeError as e:
-                error_resp = create_error_response(f"Invalid JSON: {str(e)}", time.time())
+                error_resp = create_error_response(
+                    f"Invalid JSON: {str(e)}", time.time(), config
+                )
                 print(json.dumps(error_resp), flush=True)
                 continue
 

@@ -24,6 +24,7 @@ type Handler struct {
 	llm             *llm.Client
 	semanticMatcher semantic.Matcher
 	cfg             *config.Config
+	tagsCache       *utils.TagsCache
 }
 
 func NewHandler(
@@ -39,6 +40,7 @@ func NewHandler(
 		llm:             llm,
 		semanticMatcher: semanticMatcher,
 		cfg:             cfg,
+		tagsCache:       utils.NewTagsCache(),
 	}
 }
 
@@ -200,12 +202,22 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 	}
 
 	suggestedTags := make([]string, len(tags))
-	for i, t := range tags {
-		suggestedTags[i] = t.Name
+	for i, tag := range tags {
+		suggestedTags[i] = tag.Name
 	}
 
+	newTags := h.tagsCache.GetMissingAndAdd(suggestedTags)
+
+	h.logger.Info(
+		&reqID,
+		"Tags Cache: size=%d, new=%d, hit_rate=%f",
+		h.tagsCache.Size(),
+		len(newTags),
+		h.tagsCache.HitRate(),
+	)
+
 	if len(suggestedTags) > h.cfg.Semantic.TagsThreshold {
-		suggestedTags, err = h.semanticMatcher.GetTagSuggestions(llmContent, suggestedTags, &reqID)
+		suggestedTags, err = h.semanticMatcher.GetTagSuggestions(llmContent, newTags, &reqID)
 		if err != nil {
 			h.logger.Error(&reqID, "Failed to get semantic tag suggestions: %v", err)
 			return err
@@ -224,7 +236,7 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 		h.logger.Error(&reqID, "LLM request failed: %v", err)
 		return err
 	}
-	h.logger.Debug(&reqID, "Result: %v", result)
+	h.logger.Info(&reqID, "Result: %v", result)
 
 	allTagsNames := make([]string, len(tags))
 	for i, t := range tags {

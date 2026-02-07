@@ -15,10 +15,10 @@ import (
 )
 
 type Task struct {
-	RequestID    string
-	Text         string
-	ExistingTags []string
-	Result       chan<- TaskResult
+	RequestID string
+	Text      string
+	NewTags   []string
+	Result    chan<- TaskResult
 }
 
 type TaskResult struct {
@@ -45,8 +45,8 @@ type PythonWorker struct {
 }
 
 type PythonRequest struct {
-	Text         string   `json:"text"`
-	ExistingTags []string `json:"existing_tags"`
+	Text    string   `json:"text"`
+	NewTags []string `json:"new_tags"`
 }
 
 type PythonResponse struct {
@@ -56,21 +56,9 @@ type PythonResponse struct {
 }
 
 type PythonResponseDebug struct {
-	ProcessingTimeMS    int                      `json:"processing_time_ms"`
-	TotalTagsConsidered int                      `json:"total_tags_considered"`
-	TagsAboveThreshold  int                      `json:"tags_above_threshold"`
-	CacheStats          PythonResponseCacheStats `json:"cache_stats"`
-	NewlyCachedTags     int                      `json:"newly_cached_tags"`
-}
-
-type PythonResponseCacheStats struct {
-	CacheSize      int     `json:"cache_size"`
-	TotalHits      int     `json:"total_hits"`
-	TotalMisses    int     `json:"total_misses"`
-	TotalHitRate   float64 `json:"total_hit_rate"`
-	RequestHits    int     `json:"request_hits"`
-	RequestMisses  int     `json:"request_misses"`
-	RequestHitRate float64 `json:"request_hit_rate"`
+	ProcessingTimeMS    int `json:"processing_time_ms"`
+	TotalTagsConsidered int `json:"total_tags_considered"`
+	TagsAboveThreshold  int `json:"tags_above_threshold"`
 }
 
 func NewPythonMatcher(logger *utils.Logger, cfg *config.SemanticConfig) *PythonWorkerPool {
@@ -105,15 +93,15 @@ func (p *PythonWorkerPool) Initialize() error {
 
 func (p *PythonWorkerPool) GetTagSuggestions(
 	text string,
-	existingTags []string,
+	newTags []string,
 	reqID *string,
 ) ([]string, error) {
 	result := make(chan TaskResult, 1)
 	task := Task{
-		Text:         text,
-		ExistingTags: existingTags,
-		RequestID:    *reqID,
-		Result:       result,
+		Text:      text,
+		NewTags:   newTags,
+		RequestID: *reqID,
+		Result:    result,
 	}
 
 	p.taskQueue <- task
@@ -225,8 +213,8 @@ func (w *PythonWorker) processTask(task Task) error {
 	scanner := bufio.NewScanner(w.stdout)
 
 	req := PythonRequest{
-		Text:         task.Text,
-		ExistingTags: task.ExistingTags,
+		Text:    task.Text,
+		NewTags: task.NewTags,
 	}
 
 	reqJSON, err := json.Marshal(req)
@@ -244,31 +232,16 @@ func (w *PythonWorker) processTask(task Task) error {
 		if err := json.Unmarshal([]byte(scanner.Text()), &resp); err != nil {
 			return fmt.Errorf("parse response: %w", err)
 		}
-		if *resp.Error != "" {
-			return fmt.Errorf("python error: %s", &resp.Error)
+		if resp.Error != nil && *resp.Error != "" {
+			return fmt.Errorf("python error: %s", *resp.Error)
 		}
 
 		w.pool.logger.Info(
 			&task.RequestID,
-			"Semantic matcher stats: process_ms=%d, new_tags=%d, cache_size=%d, total_cache_hit_rate=%f",
+			"Semantic matcher stats: process_ms=%d, total_tags=%d, tags_above_threshold=%d",
 			resp.DebugInfo.ProcessingTimeMS,
-			resp.DebugInfo.NewlyCachedTags,
-			resp.DebugInfo.CacheStats.CacheSize,
-			resp.DebugInfo.CacheStats.TotalHitRate,
-		)
-
-		w.pool.logger.Debug(
-			&task.RequestID,
-			"Semantic matcher stats: process_ms=%d, new_tags=%d, cache_size=%d, total_cache_hits=%d, total_cache_misses=%d, total_cache_hit_rate=%f, request_cache_hits=%d request_cache_hit_misses=%d, request_cache_hit_rate=%f",
-			resp.DebugInfo.ProcessingTimeMS,
-			resp.DebugInfo.NewlyCachedTags,
-			resp.DebugInfo.CacheStats.CacheSize,
-			resp.DebugInfo.CacheStats.TotalHits,
-			resp.DebugInfo.CacheStats.TotalMisses,
-			resp.DebugInfo.CacheStats.TotalHitRate,
-			resp.DebugInfo.CacheStats.RequestHits,
-			resp.DebugInfo.CacheStats.RequestMisses,
-			resp.DebugInfo.CacheStats.RequestHitRate,
+			resp.DebugInfo.TotalTagsConsidered,
+			resp.DebugInfo.TagsAboveThreshold,
 		)
 		task.Result <- TaskResult{Tags: resp.SuggestedTags}
 		return nil
@@ -415,9 +388,9 @@ func (p *PythonWorkerPool) HealthCheck() error {
 
 	result := make(chan TaskResult, 1)
 	task := Task{
-		Text:         "test document for health check",
-		ExistingTags: testTags,
-		Result:       result,
+		Text:    "test document for health check",
+		NewTags: testTags,
+		Result:  result,
 	}
 
 	p.taskQueue <- task

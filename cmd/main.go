@@ -45,9 +45,9 @@ func main() {
 	}
 	defer semanticMatcher.Close()
 
-	webhookhandler := api.NewHandler(logger, paperlessClient, llmClient, semanticMatcher, cfg)
+	apihandler := api.NewHandler(logger, paperlessClient, llmClient, semanticMatcher, cfg)
 
-	mux := api.RegisterRoutes(webhookhandler)
+	mux := api.RegisterRoutes(apihandler)
 
 	logger.Info(nil, "Starting server on port %s", cfg.App.ServerPort)
 	logger.Info(nil, "Endpoints:")
