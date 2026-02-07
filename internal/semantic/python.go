@@ -50,17 +50,17 @@ type PythonRequest struct {
 }
 
 type PythonResponse struct {
-	SuggestedTags []string             `json:"suggested_tags"`
-	Error         string               `json:"error,omitempty"`
-	DebugInfo     *PythonResponseDebug `json:"debug_info"`
+	SuggestedTags []string            `json:"suggested_tags"`
+	Error         *string             `json:"error"`
+	DebugInfo     PythonResponseDebug `json:"debug_info"`
 }
 
 type PythonResponseDebug struct {
-	ProcessingTimeMS    int                       `json:"processing_time_ms"`
-	TotalTagsConsidered int                       `json:"total_tags_considered"`
-	TagsAboveThreshold  int                       `json:"tags_above_threshold"`
-	CacheStats          *PythonResponseCacheStats `json:"cache_stats"`
-	NewlyCachedTags     int                       `json:"newly_cached_tags"`
+	ProcessingTimeMS    int                      `json:"processing_time_ms"`
+	TotalTagsConsidered int                      `json:"total_tags_considered"`
+	TagsAboveThreshold  int                      `json:"tags_above_threshold"`
+	CacheStats          PythonResponseCacheStats `json:"cache_stats"`
+	NewlyCachedTags     int                      `json:"newly_cached_tags"`
 }
 
 type PythonResponseCacheStats struct {
@@ -244,8 +244,8 @@ func (w *PythonWorker) processTask(task Task) error {
 		if err := json.Unmarshal([]byte(scanner.Text()), &resp); err != nil {
 			return fmt.Errorf("parse response: %w", err)
 		}
-		if resp.Error != "" {
-			return fmt.Errorf("python error: %s", resp.Error)
+		if *resp.Error != "" {
+			return fmt.Errorf("python error: %s", &resp.Error)
 		}
 
 		w.pool.logger.Info(

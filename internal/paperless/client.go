@@ -356,9 +356,9 @@ func (c *Client) UpdateDocument(documentID int, update *DocumentUpdate, reqID st
 	c.logger.Debug(&reqID,
 		"Updating document ID=%d, Title=%s, DocumentType=%d, Correspondent=%d, Tags=%v",
 		documentID,
-		*update.Title,
-		*update.DocumentType,
-		*update.Correspondent,
+		update.Title,
+		update.DocumentType,
+		update.Correspondent,
 		update.Tags,
 	)
 	resp, err := c.httpClient.Do(req)

@@ -87,7 +87,7 @@ func (c *Client) AnalyzeContent(
 			},
 		},
 		Model:            c.cfg.Model,
-		Thinking:         &ThinkingConfig{Type: "disabled"},
+		Thinking:         ThinkingConfig{Type: "disabled"},
 		FrequencyPenalty: c.cfg.FrequencyPenalty,
 		MaxTokens:        c.cfg.MaxTokens,
 		PresencePenalty:  c.cfg.PresencePenalty,

@@ -22,19 +22,19 @@ func CleanUp(text string) string {
 	return re.ReplaceAllString(text, "")
 }
 
-func Truncate(s *string, maxLenght int) *string {
+func Truncate(s string, maxLength int) string {
 	defaultString := "Unknown"
 
-	if s == nil || strings.ReplaceAll(*s, " ", "") == "" {
-		return &defaultString
+	if strings.ReplaceAll(s, " ", "") == "" {
+		return defaultString
 	}
 
-	if len(*s) <= maxLenght {
+	if len(s) <= maxLength {
 		return s
 	}
 
-	trunc := (*s)[:maxLenght]
-	return &trunc
+	trunc := (s)[:maxLength]
+	return trunc
 }
 
 func CleanCodeBlock(s string) string {

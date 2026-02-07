@@ -3,16 +3,13 @@ package paperless
 import "fmt"
 
 type Document struct {
-	ID            int            `json:"id"`
-	Title         string         `json:"title"`
-	Content       string         `json:"content"`
-	Created       string         `json:"created"`
-	Modified      string         `json:"modified"`
-	DocumentType  int            `json:"document_type"`
-	Tags          []int          `json:"tags"`
-	Correspondent int            `json:"correspondent"`
-	StoragePath   map[string]any `json:"storage_path"`
-	PageCount     int            `json:"page_count"`
+	ID            int    `json:"id"`
+	Title         string `json:"title"`
+	Content       string `json:"content"`
+	DocumentType  int    `json:"document_type"`
+	Tags          []int  `json:"tags"`
+	Correspondent int    `json:"correspondent"`
+	PageCount     int    `json:"page_count"`
 }
 
 type DocumentsResponse struct {
@@ -57,10 +54,10 @@ type CorrespondentsResponse struct {
 }
 
 type DocumentUpdate struct {
-	Title         *string `json:"title,omitempty"`
-	DocumentType  *int    `json:"document_type,omitempty"`
-	Tags          []int   `json:"tags,omitempty"`
-	Correspondent *int    `json:"correspondent,omitempty"`
+	Title         string `json:"title"`
+	DocumentType  int    `json:"document_type"`
+	Tags          []int  `json:"tags"`
+	Correspondent int    `json:"correspondent"`
 }
 
 type APIError struct {

@@ -18,22 +18,22 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
-	Messages         []ChatMessage   `json:"messages"`
-	Model            string          `json:"model"`
-	Thinking         *ThinkingConfig `json:"thinking,omitempty"`
-	FrequencyPenalty float64         `json:"frequency_penalty"`
-	MaxTokens        int             `json:"max_tokens"`
-	PresencePenalty  float64         `json:"presence_penalty"`
-	ResponseFormat   ResponseFormat  `json:"response_format"`
-	Stop             interface{}     `json:"stop"`
-	Stream           bool            `json:"stream"`
-	StreamOptions    interface{}     `json:"stream_options"`
-	Temperature      float64         `json:"temperature"`
-	TopP             float64         `json:"top_p"`
-	Tools            interface{}     `json:"tools"`
-	ToolChoice       string          `json:"tool_choice"`
-	Logprobs         bool            `json:"logprobs"`
-	TopLogprobs      interface{}     `json:"top_logprobs"`
+	Messages         []ChatMessage  `json:"messages"`
+	Model            string         `json:"model"`
+	Thinking         ThinkingConfig `json:"thinking"`
+	FrequencyPenalty float64        `json:"frequency_penalty"`
+	MaxTokens        int            `json:"max_tokens"`
+	PresencePenalty  float64        `json:"presence_penalty"`
+	ResponseFormat   ResponseFormat `json:"response_format"`
+	Stop             interface{}    `json:"stop"`
+	Stream           bool           `json:"stream"`
+	StreamOptions    interface{}    `json:"stream_options"`
+	Temperature      float64        `json:"temperature"`
+	TopP             float64        `json:"top_p"`
+	Tools            interface{}    `json:"tools"`
+	ToolChoice       string         `json:"tool_choice"`
+	Logprobs         bool           `json:"logprobs"`
+	TopLogprobs      interface{}    `json:"top_logprobs"`
 }
 
 type ThinkingConfig struct {
