@@ -104,6 +104,10 @@ func (p *PythonWorkerPool) GetTagSuggestions(
 	newTags []string,
 	reqID string,
 ) ([]string, error) {
+	if newTags == nil {
+		newTags = []string{}
+	}
+
 	result := make(chan TaskResult, 1)
 	task := Task{
 		Text:      text,
@@ -227,6 +231,10 @@ func (w *PythonWorker) processTask(task Task) error {
 	req := PythonRequest{
 		Text:    task.Text,
 		NewTags: task.NewTags,
+	}
+
+	if req.NewTags == nil {
+		req.NewTags = []string{}
 	}
 
 	reqJSON, err := json.Marshal(req)

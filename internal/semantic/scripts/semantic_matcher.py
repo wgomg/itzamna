@@ -72,10 +72,11 @@ def process_single_request(request, model, embedding_cache, config):
     if not text or not isinstance(text, str):
         return create_error_response("Invalid or empty text", start_time, config)
 
+    if new_tags is None:
+        new_tags = []
+
     if not isinstance(new_tags, list):
-        return create_error_response(
-            f"new_tags must be a list, received: {new_tags}", start_time, config
-        )
+        new_tags = []
 
     top_n = config.get("top_n", 15)
     min_similarity = float(config.get("min_similarity", 0.2))
