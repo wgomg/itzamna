@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"maps"
+	"slices"
 	"sync"
 	"time"
 )
@@ -13,6 +15,7 @@ type TagsCache struct {
 }
 
 type CacheItem struct {
+	id         int
 	value      string
 	hits       int
 	lastAccess time.Time
@@ -26,29 +29,29 @@ func NewTagsCache() *TagsCache {
 	}
 }
 
-func (c *TagsCache) GetMissingAndAdd(keys []string) []string {
+func NewCacheItem(id int, value string) CacheItem {
+	return CacheItem{id: id, value: value, hits: 0, lastAccess: time.Now()}
+}
+
+func (c *CacheItem) GetId() int {
+	return c.id
+}
+
+func (c *TagsCache) GetCachedTags() map[string]CacheItem {
+	return c.items
+}
+
+func (c *TagsCache) AddNewTags(items []CacheItem) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	missing := []string{}
-	for _, key := range keys {
-		if _, exists := c.items[key]; !exists {
-			missing = append(missing, key)
-			c.misses += 1
-			c.items[key] = CacheItem{
-				value:      key,
-				lastAccess: time.Now(),
-				hits:       0,
-			}
-		} else {
-			c.hits += 1
-			item := c.items[key]
-			item.hits += 1
-			item.lastAccess = time.Now()
-			c.items[key] = item
-		}
+	for _, item := range items {
+		c.items[item.value] = item
 	}
-	return missing
+}
+
+func (c *TagsCache) GetCachedTagsValues() []string {
+	return slices.Collect(maps.Keys(c.items))
 }
 
 func (c *TagsCache) Size() int {

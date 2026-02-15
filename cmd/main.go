@@ -52,11 +52,12 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to fetch tags:", err)
 	}
-	initialTags := make([]string, len(tags))
-	for i, t := range tags {
-		initialTags[i] = t.Name
+	initialTags := []utils.CacheItem{}
+	for _, t := range tags {
+		initialTags = append(initialTags, utils.NewCacheItem(t.ID, t.Name))
 	}
-	cachedTags := tagsCache.GetMissingAndAdd(initialTags)
+	tagsCache.AddNewTags(initialTags)
+	cachedTags := tagsCache.GetCachedTagsValues()
 	for i := 0; i < cfg.Semantic.WorkerCount; i++ {
 		workerId := i + 1
 		workerReqId := fmt.Sprintf("%s-%d", warmReqId, workerId)

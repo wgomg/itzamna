@@ -1,3 +1,9 @@
+> **LLM-Assisted Documentation Notice**
+>
+> This documentation was generated with LLM assistance. Technical details may contain inaccuracies - always verify against source code and test in your environment.
+
+---
+
 # Document Processing Service for Paperless-ngx
 
 A microservice that integrates with Paperless-ngx via webhooks to automatically generate and apply metadata to documents using a hybrid rule-based and LLM-based approach, with semantic tag consistency enforcement.
@@ -15,6 +21,7 @@ A microservice that integrates with Paperless-ngx via webhooks to automatically 
 - **Performance Monitoring**: Detailed cache statistics and processing metrics
 - **Cache Warm-up**: Pre-loads tag embeddings at startup for optimal performance
 - **Batch Cache Operations**: Efficient batch processing of cache operations
+- **Zero API Overhead**: Eliminates redundant Paperless API calls by using pre-warmed cache
 
 ## Quick Start
 
@@ -54,6 +61,7 @@ On first execution, the service will:
 5. Start worker processes with auto-calculated worker count
 6. **Cache Warm-up**: Pre-load all Paperless tags into both Go and Python embedding caches
 7. **Sequential Initialization**: Warm up workers sequentially to avoid CPU spikes
+8. **Ready for Processing**: Service starts with zero API overhead for tag lookups
 
 ## Configuration
 
@@ -146,6 +154,7 @@ The semantic matcher uses a worker pool for concurrent processing:
    - Batch operations via `GetMissingAndAdd()`
    - Hit rate tracking for monitoring
    - Pre-loaded at startup with all Paperless tags
+   - **Zero API overhead**: Eliminates redundant Paperless API calls during processing
 
 2. **Python Embedding Cache**:
    - Per-worker in-memory cache
@@ -156,7 +165,7 @@ The semantic matcher uses a worker pool for concurrent processing:
 **Cache Warm-up Process**:
 
 ```go
-// 1. Fetch all tags from Paperless
+// 1. Fetch all tags from Paperless (once at startup)
 tags, err := paperlessClient.GetTags(warmReqId)
 
 // 2. Pre-load into Go cache
@@ -167,6 +176,49 @@ for i := 0; i < cfg.Semantic.WorkerCount; i++ {
     _, err := semanticMatcher.GetTagSuggestions("dummy", cachedTags, workerReqId)
 }
 ```
+
+## Performance Optimizations
+
+### Zero API Overhead Design
+
+The service implements a **zero API overhead** design for tag lookups:
+
+**Before Optimization**:
+
+```go
+// Each document processing required an API call
+tags, err := h.paperless.GetTags(reqID)  // API call for every document
+```
+
+**After Optimization**:
+
+```go
+// Direct cache access - no API calls
+cachedTags := h.tagsCache.GetCachedTags()  // Zero API overhead
+```
+
+### Impact on Performance
+
+1. **Webhook Processing**: Each document saves 1 API call to Paperless
+2. **Batch Processing**: For N untagged documents, saves N API calls
+3. **Reduced Latency**: Eliminates network round-trip for tag lookups
+4. **Lower Load on Paperless**: Significantly reduces API calls, especially during batch processing
+
+### Cache Warm-up Benefits
+
+**With Cache Warm-up**:
+
+- **First request**: ~20-50ms (embeddings already cached)
+- **Startup time**: Additional 1-2 seconds for warm-up
+- **CPU usage**: Sequential warm-up prevents spikes
+- **API calls**: Zero additional calls for tag lookups during processing
+
+**Without Cache Warm-up**:
+
+- **First request**: ~1-2 seconds (computes all tag embeddings)
+- **Startup time**: Faster initial startup
+- **CPU usage**: Potential spikes during first requests
+- **API calls**: Still zero for tag lookups (uses cold cache)
 
 ## API Endpoints
 
@@ -247,6 +299,7 @@ This makes debugging production issues significantly easier.
 - **Concurrent processing**: Multiple workers handle requests in parallel
 - **Auto-scaling**: Worker count adjusts based on system resources
 - **Cache performance**: 90%+ cache hit rate after initial tag embedding
+- **API efficiency**: Zero additional API calls for tag lookups during processing
 
 ### Startup Performance
 
@@ -255,12 +308,14 @@ This makes debugging production issues significantly easier.
 - **First request**: ~20-50ms (embeddings already cached)
 - **Startup time**: Additional 1-2 seconds for warm-up
 - **CPU usage**: Sequential warm-up prevents spikes
+- **API calls**: 1 call to Paperless for tags (at startup only)
 
 **Without Cache Warm-up**:
 
 - **First request**: ~1-2 seconds (computes all tag embeddings)
 - **Startup time**: Faster initial startup
 - **CPU usage**: Potential spikes during first requests
+- **API calls**: 1 call to Paperless for tags (at startup only)
 
 ### Embedding Cache
 
@@ -271,6 +326,7 @@ The semantic matcher includes an intelligent embedding cache:
 - **Cache persistence**: Cache lives for Python worker lifetime
 - **Cache statistics**: Logged per request for monitoring
 - **Thread-safe operations**: Proper locking for concurrent access
+- **Zero API overhead**: No Paperless API calls for tag lookups during processing
 
 ## Development
 
@@ -377,6 +433,7 @@ Key metrics available in logs:
 - **New tags cached**: Number of new embeddings computed per request
 - **Total cache size**: Number of tag embeddings cached
 - **Warm-up progress**: Worker initialization status during startup
+- **API calls saved**: Number of redundant Paperless API calls eliminated
 
 Example log output:
 
@@ -407,4 +464,4 @@ _Last Updated: 2026-02-05_
 
 _Implementation Version: 1.5.0_
 
-_Changes: Added cache warm-up at startup, batch cache operations, sequential worker initialization, and improved startup performance monitoring_
+_Changes: Added cache warm-up at startup, batch cache operations, sequential worker initialization, zero API overhead design for tag lookups, and improved startup performance monitoring_

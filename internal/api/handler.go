@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"io"
+	"maps"
 	"net/http"
 	"path"
 	"slices"
@@ -196,29 +197,20 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 		return err
 	}
 
-	tags, err := h.paperless.GetTags(reqID)
-	if err != nil {
-		h.logger.Error(&reqID, "Failed to fetch tags: %v", err)
-		return err
-	}
-
-	suggestedTags := make([]string, len(tags))
-	for i, tag := range tags {
-		suggestedTags[i] = tag.Name
-	}
-
-	newTags := h.tagsCache.GetMissingAndAdd(suggestedTags)
+	cachedTags := h.tagsCache.GetCachedTags()
 
 	h.logger.Info(
 		&reqID,
 		"Tags Cache: size=%d, new=%d, hit_rate=%f",
 		h.tagsCache.Size(),
-		len(newTags),
+		len(cachedTags),
 		h.tagsCache.HitRate(),
 	)
 
-	if len(suggestedTags) > h.cfg.Semantic.TagsThreshold {
-		suggestedTags, err = h.semanticMatcher.GetTagSuggestions(llmContent, newTags, reqID)
+	allTagsNames := slices.Collect(maps.Keys(cachedTags))
+	suggestedTags := allTagsNames
+	if len(cachedTags) > h.cfg.Semantic.TagsThreshold {
+		suggestedTags, err = h.semanticMatcher.GetTagSuggestions(llmContent, []string{}, reqID)
 		if err != nil {
 			h.logger.Error(&reqID, "Failed to get semantic tag suggestions: %v", err)
 			return err
@@ -239,11 +231,6 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 	}
 	h.logger.Info(&reqID, "Result: %v", result)
 
-	allTagsNames := make([]string, len(tags))
-	for i, t := range tags {
-		allTagsNames[i] = t.Name
-	}
-
 	var documentNewTags []string
 	var documentExistingTags []string
 	for _, t := range result.Tags {
@@ -260,14 +247,26 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 		return err
 	}
 	var documentTagsIds []int
+	newTags := []utils.CacheItem{}
+
 	for _, ct := range createdTags {
 		documentTagsIds = append(documentTagsIds, ct.ID)
+		newTags = append(newTags, utils.NewCacheItem(ct.ID, ct.Name))
 	}
-	for _, t := range tags {
-		if slices.Contains(documentExistingTags, t.Name) {
-			documentTagsIds = append(documentTagsIds, t.ID)
-		}
+
+	for _, et := range documentExistingTags {
+		cachedTag := cachedTags[et]
+		documentTagsIds = append(documentTagsIds, cachedTag.GetId())
 	}
+
+	h.tagsCache.AddNewTags(newTags)
+	h.semanticMatcher.GetTagSuggestions(
+		"dummy",
+		documentNewTags,
+		reqID,
+	) // viviendo la vida al límite
+
+	h.logger.Info(&reqID, "Created %d new tags and cache updated.", len(documentNewTags))
 
 	maxStringLength := 127
 

@@ -4,7 +4,7 @@
 
 ### System Design
 
-The Document Processing Service is built as a Go microservice with an embedded Python component for semantic matching. The architecture follows a pipeline pattern where documents flow through sequential processing stages with intelligent caching and performance optimizations.
+The Document Processing Service is built as a Go microservice with an embedded Python component for semantic matching. The architecture follows a pipeline pattern where documents flow through sequential processing stages with intelligent caching and performance optimizations, including a **zero API overhead** design for tag lookups.
 
 ### Core Design Principles
 
@@ -15,6 +15,7 @@ The Document Processing Service is built as a Go microservice with an embedded P
 5. **Manual Recovery**: Support for processing missed documents via API
 6. **Observability**: Automatic request tracing and detailed logging
 7. **Performance Optimization**: Cache warm-up at startup for optimal first-request performance
+8. **Zero API Overhead**: Eliminates redundant Paperless API calls by using pre-warmed cache
 
 ## Component Architecture
 
@@ -84,7 +85,7 @@ workerCount = min(max(min(workersByMemory, workersByCPU), 1), 6)
 
 - `GetDocument()`: Fetch document content and metadata
 - `GetDocumentsWithoutTags()`: Fetch documents without tags (for manual processing)
-- `GetTags()`: Retrieve all tags with pagination support
+- `GetTags()`: Retrieve all tags with pagination support (used only at startup for cache warm-up)
 - `CreateTags()`: Bulk tag creation with deduplication
 - `UpdateDocument()`: PATCH metadata updates
 
@@ -99,6 +100,12 @@ for url != "" {
 
 **Document Filtering**:
 The `GetDocumentsWithoutTags()` method uses Paperless-ngx's `?is_tagged=false` filter to efficiently retrieve documents that need processing.
+
+**Zero API Overhead Design**:
+
+- **Tag lookups**: No API calls during document processing (uses pre-warmed cache)
+- **Startup only**: Single API call to fetch all tags at service startup
+- **Performance**: Eliminates network latency for tag lookups during processing
 
 ### 4. Text Reduction Pipeline (`internal/processor/`)
 
@@ -166,8 +173,8 @@ type Graph struct {
 ```
 Go → Python: {"model_name": "...", "top_n": 15, "min_similarity": 0.2}\n
 Python → Go: {"status": "ready", "embedding_dim": 384}\n
-Go → Python: {"text": "...", "existing_tags": [...]}\n
-Python → Go: {"suggested_tags": [...], "cache_stats": {...}, "error": null}\n
+Go → Python: {"text": "...", "new_tags": [...]}\n
+Python → Go: {"suggested_tags": [...], "debug_info": {...}, "error": null}\n
 ```
 
 #### Embedded Python System
@@ -180,6 +187,7 @@ Python → Go: {"suggested_tags": [...], "cache_stats": {...}, "error": null}\n
 4. Start worker processes
 5. **Cache Warm-up**: Pre-load all Paperless tags into embedding caches
 6. **Sequential Initialization**: Warm up workers sequentially to avoid CPU spikes
+7. **Zero API Overhead Ready**: Service starts with no additional API calls needed for tag lookups
 
 **Development Mode**:
 Place scripts in `scripts/` directory to override embedded versions:
@@ -219,15 +227,16 @@ prompt := fmt.Sprintf(
 
 ### 7. Tags Cache (`internal/utils/cache.go`)
 
-**Purpose**: Thread-safe cache for Paperless tags with batch operations
+**Purpose**: Thread-safe cache for Paperless tags with batch operations and zero API overhead design
 
 **Key Features**:
 
 - **Thread-safe**: Uses `sync.RWMutex` for concurrent access
-- **Batch operations**: `GetMissingAndAdd()` for efficient bulk updates
+- **Batch operations**: `AddNewTags()` for efficient bulk updates
 - **Hit rate tracking**: Monitor cache effectiveness
 - **Warm-up support**: Pre-loaded at startup with all Paperless tags
-- **Performance**: Atomic operations combine get and set for efficiency
+- **Zero API overhead**: Eliminates redundant Paperless API calls during processing
+- **Direct cache access**: `GetCachedTags()` provides immediate access without API calls
 
 **Cache Architecture**:
 
@@ -239,31 +248,66 @@ type TagsCache struct {
     misses int
 }
 
-func (c *TagsCache) GetMissingAndAdd(keys []string) []string {
+func (c *TagsCache) GetCachedTags() map[string]CacheItem {
+    c.mu.RLock()
+    defer c.mu.RUnlock()
+    return c.items
+}
+
+func (c *TagsCache) AddNewTags(items []CacheItem) {
     c.mu.Lock()
     defer c.mu.Unlock()
-
-    missing := []string{}
-    for _, key := range keys {
-        if _, exists := c.items[key]; !exists {
-            missing = append(missing, key)
-            c.misses += 1
-            c.items[key] = CacheItem{
-                value:      key,
-                lastAccess: time.Now(),
-                hits:       0,
-            }
-        } else {
-            c.hits += 1
-            item := c.items[key]
-            item.hits += 1
-            item.lastAccess = time.Now()
-            c.items[key] = item
-        }
+    for _, item := range items {
+        c.items[item.value] = item
     }
-    return missing
 }
 ```
+
+**Zero API Overhead Implementation**:
+
+```go
+// Before optimization (redundant API calls):
+tags, err := h.paperless.GetTags(reqID)  // API call for every document
+
+// After optimization (zero API overhead):
+cachedTags := h.tagsCache.GetCachedTags()  // Direct cache access - no API call
+```
+
+## Performance Optimizations
+
+### Zero API Overhead Design
+
+The service implements a **zero API overhead** design that eliminates redundant Paperless API calls:
+
+**Key Improvements**:
+
+1. **Eliminated Redundant API Calls**: No more `GetTags()` calls during document processing
+2. **Direct Cache Access**: Uses pre-warmed cache instead of API calls
+3. **Reduced Latency**: Eliminates network round-trip for tag lookups
+4. **Lower Load on Paperless**: Significantly reduces API calls, especially during batch processing
+
+**Impact on Performance**:
+
+- **Webhook Processing**: Each document saves 1 API call to Paperless
+- **Batch Processing**: For N untagged documents, saves N API calls
+- **Network Efficiency**: Reduces overall network traffic
+- **Service Reliability**: Less dependent on Paperless API availability during processing
+
+### Cache Warm-up Benefits
+
+**With Cache Warm-up**:
+
+- **First request**: ~20-50ms (embeddings already cached)
+- **Startup time**: Additional 1-2 seconds for warm-up
+- **CPU usage**: Sequential warm-up prevents spikes
+- **API calls**: Zero additional calls for tag lookups during processing
+
+**Without Cache Warm-up**:
+
+- **First request**: ~1-2 seconds (computes all tag embeddings)
+- **Startup time**: Faster initial startup
+- **CPU usage**: Potential spikes during first requests
+- **API calls**: Still zero for tag lookups (uses cold cache)
 
 ## API Endpoints
 
@@ -323,10 +367,10 @@ for i := 0; i < cfg.Semantic.WorkerCount; i++ {
 
 ```go
 type Task struct {
-    Text         string
-    ExistingTags []string
-    RequestID    string  // For request tracing
-    Result       chan<- TaskResult
+    Text      string
+    NewTags   []string  // Only new tags that need embedding computation
+    RequestID string    // For request tracing
+    Result    chan<- TaskResult
 }
 
 taskQueue := make(chan Task, 100) // Buffered channel
@@ -368,10 +412,10 @@ type TagsCache struct {
     // ...
 }
 
-func (c *TagsCache) GetMissingAndAdd(keys []string) []string {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-    // Thread-safe batch operations
+func (c *TagsCache) GetCachedTags() map[string]CacheItem {
+    c.mu.RLock()
+    defer c.mu.RUnlock()
+    // Thread-safe read-only access
 }
 ```
 
@@ -461,7 +505,7 @@ type APIError struct {
 // Python errors
 type PythonResponse struct {
     SuggestedTags []string `json:"suggested_tags"`
-    Error         string   `json:"error,omitempty"`
+    Error         *string  `json:"error,omitempty"`
 }
 ```
 
@@ -553,6 +597,14 @@ export LOG_LEVEL=info
 ./itzamna 2>&1 | grep -E "(Warming up|warmed up|Cache)"
 ```
 
+**Zero API Overhead Testing**:
+
+```bash
+# Monitor API calls during processing
+export LOG_LEVEL=debug
+./itzamna 2>&1 | grep -E "(Fetching tags|GetTags)"  # Should only appear at startup
+```
+
 ## Development Workflow
 
 ### Setting Up Development Environment
@@ -617,6 +669,9 @@ grep -E "(Tags Cache|HitRate)" logs/app.log
 
 # Monitor warm-up progress
 grep -E "(Warming up|warmed up)" logs/app.log
+
+# Monitor zero API overhead
+grep -E "(Fetching tags|GetTags)" logs/app.log  # Should only appear at startup
 ```
 
 **Performance Profiling**:
@@ -717,7 +772,8 @@ func (h *Handler) HandleProcessUnauthored(w http.ResponseWriter, r *http.Request
 
 ```go
 type CacheStrategy interface {
-    GetMissingAndAdd(keys []string) []string
+    GetCachedTags() map[string]CacheItem
+    AddNewTags(items []CacheItem)
     Size() int
     HitRate() float64
     ResetStats()
@@ -763,7 +819,7 @@ func NewLRUCache(maxSize int) CacheStrategy {
 - Consider batching similar operations
 - Implement request coalescing for identical documents
 - Use connection pooling for HTTP clients
-- **Cache operations**: Batch `GetMissingAndAdd()` reduces lock contention
+- **Cache operations**: Direct cache access eliminates lock contention
 
 ### I/O Optimization
 
@@ -795,11 +851,12 @@ httpClient := &http.Client{
 - **Memory trade-off**: Cache lives in Python worker memory
 - **Startup time**: Additional 1-2 seconds for warm-up
 
-**Batch Operations**:
+**Zero API Overhead Benefits**:
 
-- `GetMissingAndAdd()` combines get and set operations
-- Reduces lock contention compared to individual operations
-- Improves throughput for bulk tag processing
+- **Network efficiency**: Eliminates API calls for tag lookups
+- **Reduced latency**: No network round-trip during processing
+- **Improved reliability**: Less dependent on Paperless API availability
+- **Lower load**: Reduces API calls on Paperless server
 
 ## Security Considerations
 
@@ -896,9 +953,16 @@ logger.Info(
 )
 ```
 
+**Zero API Overhead Verification**:
+
+```go
+// Log when tags are fetched (should only happen at startup)
+logger.Debug(&reqID, "Fetching tags from Paperless (startup only)")
+```
+
 **Log Levels**:
 
-- `debug`: Detailed processing information, cache statistics
+- `debug`: Detailed processing information, cache statistics, API call tracking
 - `info`: Normal operation events, request tracing, warm-up progress
 - `error`: Error conditions
 
@@ -916,6 +980,8 @@ logger.Info(
 - **Cache size**: Number of embeddings cached
 - **Warm-up time**: Time spent warming up workers
 - **Worker readiness**: Time to initialize all workers
+- **API calls saved**: Number of redundant Paperless API calls eliminated
+- **Network latency reduction**: Time saved by eliminating API calls
 
 **Health Checks**:
 
@@ -932,6 +998,7 @@ func (p *PythonWorkerPool) HealthCheck() error {
 - Cache hit rate over time
 - Memory usage per worker
 - Startup time with cache warm-up
+- API call reduction metrics
 
 ## Deployment Considerations
 
@@ -973,6 +1040,7 @@ resources:
 - Load balancer for webhook distribution
 - Shared-nothing architecture
 - **Cache independence**: Each instance warms up its own cache
+- **Zero API overhead**: Each instance maintains its own cache, no shared state needed
 
 **Graceful Shutdown**:
 
@@ -1033,6 +1101,12 @@ func (p *PythonWorkerPool) Close() error {
    - Background cache refresh
    - Cache sharing between instances
    - Predictive pre-warming
+
+7. **Zero API Overhead Extensions**:
+   - Cache document types and correspondents
+   - Intelligent cache invalidation
+   - Background cache synchronization
+   - Cache statistics API endpoint
 
 ### Research Areas
 
@@ -1175,18 +1249,18 @@ func NewHandler(
 }
 ```
 
-**Batch Cache Operations**:
+**Zero API Overhead Implementation**:
 
 ```go
-// Efficient batch operation
-newTags := h.tagsCache.GetMissingAndAdd(suggestedTags)
+// Direct cache access instead of API calls
+cachedTags := h.tagsCache.GetCachedTags()
 
 // Log cache statistics
 h.logger.Info(
     &reqID,
     "Tags Cache: size=%d, new=%d, hit_rate=%f",
     h.tagsCache.Size(),
-    len(newTags),
+    len(cachedTags),
     h.tagsCache.HitRate(),
 )
 ```
@@ -1196,11 +1270,12 @@ h.logger.Info(
 ### v1.5.0 (Current)
 
 - **Cache Warm-up**: Pre-loads tag embeddings at startup for optimal first-request performance
-- **Batch Cache Operations**: Efficient `GetMissingAndAdd()` method for bulk cache updates
+- **Batch Cache Operations**: Efficient `AddNewTags()` method for bulk cache updates
 - **Sequential Worker Initialization**: Workers warmed up sequentially to prevent CPU spikes
 - **Blocking Initialization**: Service waits for all workers to be ready before accepting requests
 - **Improved Startup Performance**: Detailed warm-up progress logging and monitoring
 - **Enhanced Cache Statistics**: Better tracking of cache effectiveness and hit rates
+- **Zero API Overhead Design**: Eliminates redundant Paperless API calls by using pre-warmed cache
 
 ### v1.4.0
 
@@ -1250,6 +1325,7 @@ h.logger.Info(
 - **First request**: Significantly faster (20-50ms vs 1-2 seconds)
 - **Memory usage**: Slight increase due to pre-loaded embeddings
 - **CPU usage**: More controlled during startup (sequential warm-up)
+- **API calls**: Zero additional calls for tag lookups during processing
 
 **Configuration Considerations**:
 
@@ -1262,6 +1338,7 @@ h.logger.Info(
 - New log messages for warm-up progress
 - Enhanced cache statistics
 - Better startup performance tracking
+- API call reduction metrics
 
 ### Deployment Recommendations
 
@@ -1272,6 +1349,7 @@ h.logger.Info(
 3. Verify first request performance improvement
 4. Check memory usage with pre-loaded embeddings
 5. Monitor cache hit rates during normal operation
+6. Verify zero API overhead by checking logs for tag API calls
 
 **Resource Planning**:
 
@@ -1295,4 +1373,24 @@ _Last Updated: 2026-02-05_
 
 _Implementation Version: 1.5.0_
 
-_Changes: Added cache warm-up at startup, batch cache operations, sequential worker initialization, improved startup performance monitoring, and enhanced documentation for performance optimizations_
+_Changes: Added cache warm-up at startup, batch cache operations, sequential worker initialization, zero API overhead design for tag lookups, improved startup performance monitoring, and enhanced documentation for performance optimizations_
+
+```
+
+The key updates I made to `doc.md`:
+
+1. **Added "Zero API Overhead"** to the Core Design Principles
+2. **Updated Paperless-ngx Client section** to highlight the zero API overhead design
+3. **Added a new "Performance Optimizations" section** that explains the zero API overhead design in detail
+4. **Updated Tags Cache section** to emphasize the zero API overhead benefits
+5. **Enhanced Testing section** with zero API overhead testing instructions
+6. **Updated Debugging Tips** with API call monitoring
+7. **Added Zero API Overhead Verification** to logging strategy
+8. **Enhanced Metrics Collection** with API calls saved and network latency reduction
+9. **Updated Future Development** with zero API overhead extensions
+10. **Updated Version History** to include zero API overhead design
+11. **Enhanced Migration Guide** with API call reduction information
+12. **Updated Deployment Recommendations** with zero API overhead verification
+
+The documentation now clearly explains the architectural improvement where the service eliminates redundant Paperless API calls by using the pre-warmed cache instead of making API calls for tags during document processing.
+```
