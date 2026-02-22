@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -246,10 +247,25 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 		h.logger.Error(&reqID, "Failed to create new tags: %v", err)
 		return err
 	}
+
+	if len(createdTags.FailedTags) > 0 {
+		h.logger.Debug(&reqID, "Failed to create %d tags: %v",
+			len(createdTags.FailedTags), createdTags.FailedTags)
+
+		for tagName, tagErr := range createdTags.Errors {
+			h.logger.Error(&reqID, "Tag '%s' creation failed: %v", tagName, tagErr)
+		}
+	}
+
+	if len(createdTags.CreatedTags) == 0 && len(documentNewTags) > 0 {
+		h.logger.Error(&reqID, "All %d new tags failed to create", len(documentNewTags))
+		return fmt.Errorf("failed to create any new tags")
+	}
+
 	var documentTagsIds []int
 	newTags := []utils.CacheItem{}
 
-	for _, ct := range createdTags {
+	for _, ct := range createdTags.CreatedTags {
 		documentTagsIds = append(documentTagsIds, ct.ID)
 		newTags = append(newTags, utils.NewCacheItem(ct.ID, ct.Name))
 	}
@@ -260,13 +276,22 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 	}
 
 	h.tagsCache.AddNewTags(newTags)
-	h.semanticMatcher.GetTagSuggestions(
-		"dummy",
-		documentNewTags,
-		reqID,
-	) // viviendo la vida al límite
 
-	h.logger.Info(&reqID, "Created %d new tags and cache updated.", len(documentNewTags))
+	if len(createdTags.CreatedTags) > 0 {
+		createdTagNames := make([]string, len(createdTags.CreatedTags))
+		for i, ct := range createdTags.CreatedTags {
+			createdTagNames[i] = ct.Name
+		}
+
+		h.semanticMatcher.GetTagSuggestions(
+			"dummy",
+			createdTagNames,
+			reqID,
+		) // viviendo la vida al límite
+	}
+
+	h.logger.Info(&reqID, "Created %d new tags (failed: %d) and cache updated.",
+		len(createdTags.CreatedTags), len(createdTags.FailedTags))
 
 	maxStringLength := 127
 

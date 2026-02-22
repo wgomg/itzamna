@@ -148,6 +148,44 @@ func (c *Client) GetDocumentTypes(reqID string) ([]DocumentType, error) {
 	return dtResponse.Results, nil
 }
 
+func (c *Client) GetTag(tagName string, reqID string) (*Tag, error) {
+	url := fmt.Sprintf("%s/api/tags/?name__iexact=%s", c.baseURL, tagName)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.setAuthHeaders(req)
+
+	c.logger.Debug(&reqID, "Fetching tag `%s` from %s", tagName, url)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch tag: %w", err)
+	}
+	defer resp.Body.Close()
+
+	_, err = httputils.LogResponseBody(resp, c.logger, reqID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleAPIError(resp)
+	}
+
+	var tagResponse TagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tagResponse); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(tagResponse.Results) == 0 {
+		return nil, fmt.Errorf("tag `%s` not found", tagName)
+	}
+
+	return &tagResponse.Results[0], nil
+}
+
 func (c *Client) GetTags(reqID string) ([]Tag, error) {
 	url := fmt.Sprintf("%s/api/tags/", c.baseURL)
 	var allTags []Tag
@@ -190,20 +228,31 @@ func (c *Client) GetTags(reqID string) ([]Tag, error) {
 	return allTags, nil
 }
 
-func (c *Client) CreateTags(newTags []string, reqID string) ([]Tag, error) {
+func (c *Client) CreateTags(newTags []string, reqID string) (*CreateTagsResult, error) {
 	url := fmt.Sprintf("%s/api/tags/", c.baseURL)
-	var createdTags []Tag
+
+	result := &CreateTagsResult{
+		CreatedTags: []Tag{},
+		FailedTags:  []string{},
+		Errors:      make(map[string]error),
+	}
 
 	for _, nt := range newTags {
 		newTag := Tag{Name: nt, MatchingAlgorithm: 0, IsInboxTag: false}
 		jsonNewTag, err := json.Marshal(newTag)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal new tag: %v", err)
+			result.FailedTags = append(result.FailedTags, nt)
+			result.Errors[nt] = fmt.Errorf("failed to marshal new tag: %v", err)
+			c.logger.Error(&reqID, "Failed to marshal tag '%s': %v", nt, err)
+			continue
 		}
 
 		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonNewTag))
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %v", err)
+			result.FailedTags = append(result.FailedTags, nt)
+			result.Errors[nt] = fmt.Errorf("failed to create request: %v", err)
+			c.logger.Error(&reqID, "Failed to create request for tag '%s': %v", nt, err)
+			continue
 		}
 
 		c.setAuthHeaders(req)
@@ -213,26 +262,58 @@ func (c *Client) CreateTags(newTags []string, reqID string) ([]Tag, error) {
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create new tag: %v", err)
+			result.FailedTags = append(result.FailedTags, nt)
+			result.Errors[nt] = fmt.Errorf("failed to create new tag: %v", err)
+			c.logger.Error(&reqID, "Failed to create tag '%s': %v", nt, err)
+			continue
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 			body, _ := io.ReadAll(resp.Body)
-			return nil, fmt.Errorf("failed to create tag '%s': API error %d: %s",
-				nt, resp.StatusCode, string(body))
-		}
 
-		var createdTag Tag
-		if err := json.NewDecoder(resp.Body).Decode(&createdTag); err != nil {
-			return nil, fmt.Errorf("failed to decode created tag response: %v", err)
+			if resp.StatusCode != http.StatusBadRequest {
+				result.FailedTags = append(result.FailedTags, nt)
+				result.Errors[nt] = fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+				c.logger.Error(&reqID, "Failed to create tag '%s': API error %d: %s",
+					nt, resp.StatusCode, string(body))
+				continue
+			}
+
+			c.logger.Debug(&reqID, "Tag `%s` already exists.", nt)
+
+			tag, err := c.GetTag(nt, reqID)
+			if err != nil {
+				result.FailedTags = append(result.FailedTags, nt)
+				result.Errors[nt] = fmt.Errorf("tag exists but failed to fetch: %v", err)
+				c.logger.Error(&reqID, "Tag '%s' exists but failed to fetch: %v", nt, err)
+				continue
+			}
+
+			result.CreatedTags = append(result.CreatedTags, *tag)
+			c.logger.Debug(&reqID, "Using existing tag: %s (ID: %d)", tag.Name, tag.ID)
+		} else {
+			var createdTag Tag
+			if err := json.NewDecoder(resp.Body).Decode(&createdTag); err != nil {
+				result.FailedTags = append(result.FailedTags, nt)
+				result.Errors[nt] = fmt.Errorf("failed to decode created tag response: %v", err)
+				c.logger.Error(&reqID, "Failed to decode response for tag '%s': %v", nt, err)
+				continue
+			}
+			c.logger.Debug(&reqID, "Successfully created tag: %s (ID: %d)",
+				createdTag.Name, createdTag.ID)
+			result.CreatedTags = append(result.CreatedTags, createdTag)
 		}
-		c.logger.Debug(&reqID, "Successfully created tag: %s (ID: %d)",
-			createdTag.Name, createdTag.ID)
-		createdTags = append(createdTags, createdTag)
 	}
 
-	return createdTags, nil
+	if len(result.FailedTags) > 0 {
+		c.logger.Debug(&reqID, "Tag creation completed with %d successes and %d failures: %v",
+			len(result.CreatedTags), len(result.FailedTags), result.FailedTags)
+	} else {
+		c.logger.Info(&reqID, "All %d tags created successfully", len(result.CreatedTags))
+	}
+
+	return result, nil
 }
 
 func (c *Client) GetCorrespondents(name *string, reqID string) ([]Correspondent, error) {

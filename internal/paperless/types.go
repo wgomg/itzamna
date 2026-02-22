@@ -40,6 +40,11 @@ type TagsResponse struct {
 	Results []Tag  `json:"results"`
 	Next    string `json:"next"`
 }
+type CreateTagsResult struct {
+	CreatedTags []Tag
+	FailedTags  []string
+	Errors      map[string]error
+}
 
 type Correspondent struct {
 	ID                int    `json:"id,omitempty"`

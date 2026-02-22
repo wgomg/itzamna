@@ -30,14 +30,14 @@ func NewLogger(level string, rawBodyLog bool) *Logger {
 
 	return &Logger{
 		level:       logLevel,
-		infoLogger:  log.New(os.Stdout, "INFO  : ", log.Ldate|log.Ltime|log.Lshortfile),
-		errorLogger: log.New(os.Stderr, "ERROR : ", log.Ldate|log.Ltime|log.Lshortfile),
+		infoLogger:  log.New(os.Stdout, "<6>INFO  : ", log.Ldate|log.Ltime|log.Lshortfile),
+		errorLogger: log.New(os.Stderr, "<3>ERROR : ", log.Ldate|log.Ltime|log.Lshortfile),
 		debugLogger: log.New(
 			os.Stdout,
-			"DEBUG : ",
+			"<7>DEBUG : ",
 			log.Ldate|log.Ltime|log.Lshortfile,
 		),
-		fatalLogger: log.New(os.Stderr, "FATAL : ", log.Ldate|log.Ltime|log.Lshortfile),
+		fatalLogger: log.New(os.Stderr, "<2>FATAL : ", log.Ldate|log.Ltime|log.Lshortfile),
 		RawBodyLog:  rawBodyLog,
 	}
 }
