@@ -199,13 +199,14 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 	}
 
 	cachedTags := h.tagsCache.GetCachedTags()
-
+	stats := h.tagsCache.Stats()
 	h.logger.Info(
 		&reqID,
-		"Tags Cache: size=%d, new=%d, hit_rate=%f",
-		h.tagsCache.Size(),
-		len(cachedTags),
-		h.tagsCache.HitRate(),
+		"Tags Cache: size=%d, reads=%d, updates=%d, uptime=%.0fs",
+		stats["size"],
+		stats["total_reads"],
+		stats["total_updates"],
+		stats["uptime_seconds"],
 	)
 
 	allTagsNames := slices.Collect(maps.Keys(cachedTags))

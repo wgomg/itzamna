@@ -164,7 +164,9 @@ def main():
     ready_msg = {"status": "ready", "embedding_dim": embedding_dim}
     print(json.dumps(ready_msg), flush=True)
 
-    print("Cache initialized. Ready for requests.", file=sys.stderr)
+    print(
+        "Semantic Tag Matcher initialized, waiting for cache warmp-up...", file=sys.stderr
+    )
 
     request_count = 0
     while True:

@@ -48,6 +48,7 @@ func main() {
 
 	tagsCache := utils.NewTagsCache()
 	warmReqId := "warm-up"
+	logger.Info(&warmReqId, "Warming up semantic matcher and internal cache")
 	tags, err := paperlessClient.GetTags(warmReqId)
 	if err != nil {
 		logger.Fatal("Failed to fetch tags:", err)
