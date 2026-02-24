@@ -47,7 +47,11 @@ func (c *TagsCache) GetCachedTags() map[string]CacheItem {
 func (c *TagsCache) AddNewTags(items []CacheItem) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.updates++
+
+	if len(items) > 0 {
+		c.updates++
+	}
+
 	for _, item := range items {
 		c.items[item.value] = item
 	}

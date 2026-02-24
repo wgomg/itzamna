@@ -65,14 +65,14 @@ func ReduceContent(content string, cfg *config.ReductionConfig) string {
 		return cmp.Compare(a.Id, b.Id)
 	})
 
-	reducedContent := selectedChunks[0].RawText
+	var reducedContent strings.Builder
+	reducedContent.WriteString(selectedChunks[0].RawText)
 
 	for _, chunk := range selectedChunks[1:] {
-		reducedContent += "\n"
-		reducedContent += strings.Join(chunk.Words[overlap:], " ")
+		reducedContent.WriteString(strings.Join(chunk.Words[overlap:], " "))
 	}
 
-	return reducedContent
+	return reducedContent.String()
 }
 
 func createChunks(words []string, chunkSize int, overlap int) []Chunk {

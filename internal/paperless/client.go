@@ -190,7 +190,7 @@ func (c *Client) GetTags(reqID string) ([]Tag, error) {
 	url := fmt.Sprintf("%s/api/tags/", c.baseURL)
 	var allTags []Tag
 
-	c.logger.Debug(&reqID, "Fetching tags from %s", url)
+	c.logger.Info(&reqID, "Fetching tags from %s", url)
 	for url != "" {
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
@@ -223,7 +223,7 @@ func (c *Client) GetTags(reqID string) ([]Tag, error) {
 		url = tagsResponse.Next
 	}
 
-	c.logger.Debug(&reqID, "Found %d tags.", len(allTags))
+	c.logger.Info(&reqID, "Found %d tags.", len(allTags))
 
 	return allTags, nil
 }
