@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/wgomg/itzamna/internal/api"
@@ -59,32 +58,17 @@ func main() {
 	}
 	tagsCache.AddNewTags(initialTags)
 	cachedTags := tagsCache.GetCachedTagsValues()
-	for i := 0; i < cfg.Semantic.WorkerCount; i++ {
-		workerId := i + 1
-		workerReqId := fmt.Sprintf("%s-%d", warmReqId, workerId)
+	logger.Info(&warmReqId, "Warming up semantic matcher")
 
-		logger.Info(
-			&workerReqId,
-			"Warming up semantic matcher worker %d/%d",
-			workerId,
-			cfg.Semantic.WorkerCount,
-		)
-
-		_, err := semanticMatcher.GetTagSuggestions("dummy", cachedTags, workerReqId)
-		if err != nil {
-			logger.Fatal(
-				fmt.Sprintf("Failed to warm up semantic embedding cache for worker %d:", workerId),
-				err,
-			)
-		}
-
-		logger.Info(
-			&workerReqId,
-			"Worker %d/%d warmed up successfully",
-			workerId,
-			cfg.Semantic.WorkerCount,
-		)
+	_, err = semanticMatcher.GetTagSuggestions("dummy", cachedTags, warmReqId)
+	if err != nil {
+		logger.Fatal("Failed to warm up semantic embedding cache", err)
 	}
+
+	logger.Info(
+		&warmReqId,
+		"Semantic matcher embeddings warmed up successfully",
+	)
 
 	apihandler := api.NewHandler(
 		logger,

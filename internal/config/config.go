@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -42,10 +41,7 @@ type LlmConfig struct {
 }
 
 type PythonConfig struct {
-	ConfigDir              string
-	ProcessStartupDelay    int
-	ProcessShutdownTimeout int
-	ProcessKillTimeout     int
+	ConfigDir string
 }
 
 type SemanticConfig struct {
@@ -54,7 +50,6 @@ type SemanticConfig struct {
 	TimeoutMs     int
 	Model         string
 	TagsThreshold int
-	WorkerCount   int
 	Python        PythonConfig
 }
 
@@ -92,15 +87,13 @@ func Load() (*Config, error) {
 	}
 	defaultPythonDir := filepath.Join(homeDir, ".config", "itzamna")
 
-	defaultWorkerCount := calculateDefaultWorkerCount()
-
 	return &Config{
 		App: AppConfig{
 			Env:                env,
 			LogLevel:           logLevel,
 			ServerPort:         getEnv("APP_SERVER_PORT", "8080"),
 			RawBodyLog:         getEnvBool("APP_RAW_BODY_LOG", false),
-			HttpTimeoutSeconds: getEnvInt("APP_HTTP_TIMEOUT_SECONDS", 30),
+			HttpTimeoutSeconds: getEnvInt("APP_HTTP_TIMEOUT_SECONDS", 60),
 		},
 		Paperless: PaperlessConfig{
 			URL:   getEnv("PAPERLESS_URL", ""),
@@ -118,12 +111,8 @@ func Load() (*Config, error) {
 			TimeoutMs:     getEnvInt("SEMANTIC_TIMEOUT_MS", 10000),
 			Model:         getEnv("SEMANTIC_MODEL_NAME", "all-MiniLM-L6-v2"),
 			TagsThreshold: getEnvInt("SEMANTIC_TAGS_THRESHOLD", 15),
-			WorkerCount:   getEnvInt("SEMANTIC_WORKER_COUNT", defaultWorkerCount),
 			Python: PythonConfig{
-				ConfigDir:              getEnv("SEMANTIC_PYTHON_CONFIG_DIR", defaultPythonDir),
-				ProcessStartupDelay:    getEnvInt("SEMANTIC_PYTHON_PROCESS_STARTUP_DELAY", 2),
-				ProcessShutdownTimeout: getEnvInt("SEMANTIC_PYTHON_PROCESS_SHUTDOWN_TIMEOUT", 5),
-				ProcessKillTimeout:     getEnvInt("SEMANTIC_PYTHON_PROCESS_KILL_TIMEOUT", 2),
+				ConfigDir: getEnv("SEMANTIC_PYTHON_CONFIG_DIR", defaultPythonDir),
 			},
 		},
 		Reduction: ReductionConfig{
@@ -159,47 +148,6 @@ func parseEnvironment(envStr string) Environment {
 	default:
 		return Development
 	}
-}
-
-func calculateDefaultWorkerCount() int {
-	cpuCores := runtime.NumCPU()
-
-	// estimate model memory usage (conservative estimate for default model)
-	// all-MiniLM-L6-v2: ~90MB, multilingual models: 120-420MB
-	// using 200MB as conservative estimate
-	modelMemoryMB := 200
-
-	var availableMemoryMB int64 = 4096 // default to 4GB
-
-	// trying to read system memory
-	if memInfo, err := os.ReadFile("/proc/meminfo"); err == nil {
-		lines := strings.Split(string(memInfo), "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "MemTotal:") {
-				fields := strings.Fields(line)
-				if len(fields) >= 2 {
-					if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
-						availableMemoryMB = kb / 1024
-						break
-					}
-				}
-			}
-		}
-	}
-
-	workersByCPU := min(cpuCores, 6)
-
-	// calculate based on memory (leave 2GB for system and Go process)
-	systemReservedMB := 2048
-	usableMemoryMB := int(availableMemoryMB) - systemReservedMB
-	if usableMemoryMB < 0 {
-		usableMemoryMB = 2048
-	}
-
-	workersByMemory := max(min(usableMemoryMB/modelMemoryMB, 6), 1)
-	workerCount := min(max(min(workersByMemory, workersByCPU), 1), 6)
-
-	return workerCount
 }
 
 func getLogLevel(env Environment) string {

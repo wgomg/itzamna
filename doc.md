@@ -16,6 +16,7 @@ The Document Processing Service is built as a Go microservice with an embedded P
 6. **Observability**: Automatic request tracing and detailed logging
 7. **Performance Optimization**: Cache warm-up at startup for optimal first-request performance
 8. **Zero API Overhead**: Eliminates redundant Paperless API calls by using pre-warmed cache
+9. **Simplified Architecture**: Single Python process for semantic matching, no worker pool complexity
 
 ## Component Architecture
 
@@ -65,16 +66,23 @@ HandleProcessUntagged() → GetDocumentsWithoutTags() → Process() (for each) �
 
 - Automatic environment detection (development/production)
 - Default value management
-- Worker count auto-calculation based on system resources
 - Type-safe configuration access
 
-**Worker Count Calculation**:
+**Configuration Structure**:
 
 ```go
-// Based on CPU cores and available memory
-workersByCPU = min(cpuCores, 6)
-workersByMemory = max(min(usableMemoryMB/modelMemoryMB, 6), 1)
-workerCount = min(max(min(workersByMemory, workersByCPU), 1), 6)
+type SemanticConfig struct {
+    TopN          int
+    MinSimilarity float64
+    TimeoutMs     int
+    Model         string
+    TagsThreshold int
+    Python        PythonConfig
+}
+
+type PythonConfig struct {
+    ConfigDir string  // No more worker timing configs
+}
 ```
 
 ### 3. Paperless-ngx Client (`internal/paperless/`)
@@ -142,30 +150,23 @@ type Graph struct {
 
 **Purpose**: Find semantically similar tags using sentence-transformers with intelligent caching and warm-up optimization
 
-#### Worker Pool Architecture
+#### Simplified Single-Process Architecture
 
-**PythonWorkerPool**:
+**PythonMatcher**:
 
-- Manages pool of Python worker processes
-- Buffered task queue (100 tasks)
-- Automatic worker lifecycle management
+- Manages a single Python process for semantic matching
+- Buffered task queue (100 tasks) for concurrent request handling
+- Automatic process lifecycle management
 - Health monitoring and recovery
-- **Sequential warm-up**: Workers initialized sequentially to prevent CPU spikes
-- **Blocking initialization**: Service waits for all workers to be ready before accepting requests
-
-**PythonWorker**:
-
-- Individual Python process wrapper
-- JSON-over-stdin/stdout communication
-- Thread-safe with `sync.Mutex`
-- Automatic cleanup
+- **Single cache**: One embedding cache shared across all requests
+- **Simplified initialization**: No worker coordination needed
 
 **Embedding Cache**:
 
-- **In-memory cache**: Each Python worker maintains tag → embedding dictionary
+- **In-memory cache**: Single Python process maintains tag → embedding dictionary
 - **Performance**: 10x speedup after initial tag embedding
-- **Statistics**: Track hits/misses for monitoring
-- **Persistence**: Cache lives for Python worker lifetime
+- **Statistics**: Track processing time and tags considered
+- **Persistence**: Cache lives for Python process lifetime
 - **Warm-up**: Pre-loaded at startup for optimal first-request performance
 
 **Communication Protocol**:
@@ -184,10 +185,9 @@ Python → Go: {"suggested_tags": [...], "debug_info": {...}, "error": null}\n
 1. Extract embedded scripts to `~/.config/itzamna/python/`
 2. Create Python virtual environment
 3. Install dependencies (`sentence-transformers`, `torch`, `numpy`)
-4. Start worker processes
-5. **Cache Warm-up**: Pre-load all Paperless tags into embedding caches
-6. **Sequential Initialization**: Warm up workers sequentially to avoid CPU spikes
-7. **Zero API Overhead Ready**: Service starts with no additional API calls needed for tag lookups
+4. Start single Python process
+5. **Cache Warm-up**: Pre-load all Paperless tags into embedding cache
+6. **Zero API Overhead Ready**: Service starts with no additional API calls needed for tag lookups
 
 **Development Mode**:
 Place scripts in `scripts/` directory to override embedded versions:
@@ -233,7 +233,7 @@ prompt := fmt.Sprintf(
 
 - **Thread-safe**: Uses `sync.RWMutex` for concurrent access
 - **Batch operations**: `AddNewTags()` for efficient bulk updates
-- **Hit rate tracking**: Monitor cache effectiveness
+- **Statistics tracking**: Monitor cache reads, updates, and uptime
 - **Warm-up support**: Pre-loaded at startup with all Paperless tags
 - **Zero API overhead**: Eliminates redundant Paperless API calls during processing
 - **Direct cache access**: `GetCachedTags()` provides immediate access without API calls
@@ -242,21 +242,28 @@ prompt := fmt.Sprintf(
 
 ```go
 type TagsCache struct {
-    mu     sync.RWMutex
-    items  map[string]CacheItem
-    hits   int
-    misses int
+    mu          sync.RWMutex
+    items       map[string]CacheItem
+    reads       int
+    updates     int
+    startupTime time.Time
 }
 
 func (c *TagsCache) GetCachedTags() map[string]CacheItem {
     c.mu.RLock()
     defer c.mu.RUnlock()
+    c.reads++
     return c.items
 }
 
 func (c *TagsCache) AddNewTags(items []CacheItem) {
     c.mu.Lock()
     defer c.mu.Unlock()
+
+    if len(items) > 0 {
+        c.updates++
+    }
+
     for _, item := range items {
         c.items[item.value] = item
     }
@@ -299,14 +306,12 @@ The service implements a **zero API overhead** design that eliminates redundant 
 
 - **First request**: ~20-50ms (embeddings already cached)
 - **Startup time**: Additional 1-2 seconds for warm-up
-- **CPU usage**: Sequential warm-up prevents spikes
 - **API calls**: Zero additional calls for tag lookups during processing
 
 **Without Cache Warm-up**:
 
 - **First request**: ~1-2 seconds (computes all tag embeddings)
 - **Startup time**: Faster initial startup
-- **CPU usage**: Potential spikes during first requests
 - **API calls**: Still zero for tag lookups (uses cold cache)
 
 ## API Endpoints
@@ -346,24 +351,7 @@ for _, document := range documents {
 }
 ```
 
-**Worker Pool Pattern**:
-
-```go
-// Python worker pool with sequential warm-up
-for i := 0; i < cfg.Semantic.WorkerCount; i++ {
-    p.wg.Add(1)
-    go p.runWorker(i, readyCh)
-}
-
-// Wait for all workers to be ready
-for i := 0; i < cfg.Semantic.WorkerCount; i++ {
-    if err := <-readyCh; err != nil {
-        return fmt.Errorf("worker failed to start: %w", err)
-    }
-}
-```
-
-**Task Queue**:
+**Task Queue Pattern**:
 
 ```go
 type Task struct {
@@ -373,7 +361,7 @@ type Task struct {
     Result    chan<- TaskResult
 }
 
-taskQueue := make(chan Task, 100) // Buffered channel
+taskQueue := make(chan Task, 100) // Buffered channel for concurrent requests
 ```
 
 ### Synchronization
@@ -381,25 +369,15 @@ taskQueue := make(chan Task, 100) // Buffered channel
 **Mutex Protection**:
 
 ```go
-type PythonWorker struct {
-    mu sync.Mutex
+type PythonMatcher struct {
+    mu        sync.Mutex
     // ...
 }
 
-func (w *PythonWorker) processTask(task Task) error {
-    w.mu.Lock()
-    defer w.mu.Unlock()
+func (p *PythonMatcher) processTask(task Task) {
+    p.mu.Lock()
+    defer p.mu.Unlock()
     // Thread-safe operations
-}
-```
-
-**WaitGroup for Clean Shutdown**:
-
-```go
-func (p *PythonWorkerPool) Close() error {
-    close(p.taskQueue)
-    p.wg.Wait() // Wait for all workers to finish
-    return nil
 }
 ```
 
@@ -474,15 +452,10 @@ if failed > 0 {
 **Startup Failures**:
 
 ```go
-// Sequential warm-up with individual error handling
-for i := 0; i < cfg.Semantic.WorkerCount; i++ {
-    _, err := semanticMatcher.GetTagSuggestions("dummy", cachedTags, workerReqId)
-    if err != nil {
-        logger.Fatal(
-            fmt.Sprintf("Failed to warm up semantic embedding cache for worker %d:", workerId),
-            err,
-        )
-    }
+// Single process warm-up with error handling
+_, err = semanticMatcher.GetTagSuggestions("dummy", cachedTags, warmReqId)
+if err != nil {
+    logger.Fatal("Failed to warm up semantic embedding cache", err)
 }
 ```
 
@@ -519,7 +492,7 @@ type PythonResponse struct {
 
 2. **Optional Variables**:
    - `SEMANTIC_MODEL_NAME`: Model selection
-   - `SEMANTIC_WORKER_COUNT`: Worker pool size
+   - `SEMANTIC_MIN_SIMILARITY`: Similarity threshold
    - `REDUCTION_THRESHOLD_TOKENS`: Text reduction threshold
 
 3. **Development Variables**:
@@ -581,14 +554,6 @@ curl -X POST http://localhost:8080/webhook \
 curl -X POST http://localhost:8080/process/untagged
 ```
 
-**Worker Pool Testing**:
-
-```bash
-export SEMANTIC_WORKER_COUNT=2
-export LOG_LEVEL=debug
-./itzamna
-```
-
 **Cache Warm-up Testing**:
 
 ```bash
@@ -646,7 +611,6 @@ cp internal/semantic/scripts/* scripts/
 ```bash
 export LOG_LEVEL=debug
 export RAW_BODY_LOG=true
-export SEMANTIC_WORKER_COUNT=1  # Easier to debug single worker
 ```
 
 **Python Process Debugging**:
@@ -664,8 +628,8 @@ export SEMANTIC_WORKER_COUNT=1  # Easier to debug single worker
 **Cache Performance Monitoring**:
 
 ```bash
-# Monitor cache hit rates
-grep -E "(Tags Cache|HitRate)" logs/app.log
+# Monitor cache statistics
+grep -E "(Tags Cache|reads=|updates=)" logs/app.log
 
 # Monitor warm-up progress
 grep -E "(Warming up|warmed up)" logs/app.log
@@ -775,7 +739,7 @@ type CacheStrategy interface {
     GetCachedTags() map[string]CacheItem
     AddNewTags(items []CacheItem)
     Size() int
-    HitRate() float64
+    Stats() map[string]interface{}
     ResetStats()
 }
 
@@ -791,28 +755,25 @@ func NewLRUCache(maxSize int) CacheStrategy {
 
 ### Memory Management
 
-**Python Workers**:
+**Python Process**:
 
-- Each worker loads model into memory (~90-420MB)
-- Worker count auto-calculated based on available memory
+- Single process loads model into memory (~90-420MB depending on model)
 - Consider smaller models for memory-constrained environments
-- **Cache memory**: Each worker caches tag embeddings (~4KB per tag)
+- **Cache memory**: Single cache for all tag embeddings (~4KB per tag)
 
 **Go Service**:
 
 - Document content stored in memory during processing
 - Consider streaming for very large documents
-- Implement LRU cache for frequent operations
 - **Tags cache**: Minimal memory overhead (string storage only)
 
 ### CPU Utilization
 
-**Worker Pool Sizing**:
+**Simplified Architecture**:
 
-- Default: 1-6 workers based on CPU cores
-- Adjust based on workload characteristics
-- Monitor CPU usage under load
-- **Sequential warm-up**: Prevents CPU spikes during startup
+- No worker pool coordination overhead
+- Single Python process handles all semantic matching
+- Go goroutines handle concurrent requests efficiently
 
 **Batch Processing**:
 
@@ -848,7 +809,7 @@ httpClient := &http.Client{
 
 - **First request**: ~20-50ms (embeddings already cached)
 - **Without warm-up**: ~1-2 seconds (computes all tag embeddings)
-- **Memory trade-off**: Cache lives in Python worker memory
+- **Memory trade-off**: Cache lives in Python process memory
 - **Startup time**: Additional 1-2 seconds for warm-up
 
 **Zero API Overhead Benefits**:
@@ -892,15 +853,15 @@ httpClient := &http.Client{
 
 **Data Isolation**:
 
-- Each Python worker has separate cache
-- No shared state between workers
-- Cache cleared on worker restart
+- Single Python process cache
+- No shared state between instances
+- Cache cleared on process restart
 
 **Memory Limits**:
 
-- Worker count limited by available memory
-- Model size considered in worker calculation
+- Model size considered in resource planning
 - Cache size grows with tag count
+- Monitor Python process memory usage
 
 ## Monitoring and Observability
 
@@ -928,29 +889,19 @@ logger.Error(&reqID, "Error processing untagged document ID=%d: %v", document.ID
 ```go
 logger.Info(
     &reqID,
-    "Tags Cache: size=%d, new=%d, hit_rate=%f",
+    "Tags Cache: size=%d, reads=%d, updates=%d, uptime=%.0fs",
     h.tagsCache.Size(),
-    len(newTags),
-    h.tagsCache.HitRate(),
+    stats["total_reads"],
+    stats["total_updates"],
+    stats["uptime_seconds"],
 )
 ```
 
 **Warm-up Progress**:
 
 ```go
-logger.Info(
-    &workerReqId,
-    "Warming up semantic matcher worker %d/%d",
-    workerId,
-    cfg.Semantic.WorkerCount,
-)
-
-logger.Info(
-    &workerReqId,
-    "Worker %d/%d warmed up successfully",
-    workerId,
-    cfg.Semantic.WorkerCount,
-)
+logger.Info(&warmReqId, "Warming up semantic matcher and internal cache")
+logger.Info(&warmReqId, "Semantic matcher embeddings warmed up successfully")
 ```
 
 **Zero API Overhead Verification**:
@@ -973,21 +924,19 @@ logger.Debug(&reqID, "Fetching tags from Paperless (startup only)")
 - Documents processed per second
 - Average processing time
 - Error rates by component
-- Queue depth for worker pool
 - LLM token usage
 - Manual processing success/failure rates
-- **Cache hit rates**: Total and per-request
-- **Cache size**: Number of embeddings cached
-- **Warm-up time**: Time spent warming up workers
-- **Worker readiness**: Time to initialize all workers
+- **Cache size**: Number of tags cached
+- **Cache reads/updates**: Cache activity statistics
+- **Warm-up time**: Time spent warming up cache
 - **API calls saved**: Number of redundant Paperless API calls eliminated
 - **Network latency reduction**: Time saved by eliminating API calls
 
 **Health Checks**:
 
 ```go
-func (p *PythonWorkerPool) HealthCheck() error {
-    // Test worker responsiveness
+func (p *PythonMatcher) HealthCheck() error {
+    // Test Python process responsiveness
     return nil
 }
 ```
@@ -995,8 +944,8 @@ func (p *PythonWorkerPool) HealthCheck() error {
 **Performance Benchmarks**:
 
 - First request latency (with/without warm-up)
-- Cache hit rate over time
-- Memory usage per worker
+- Cache effectiveness over time
+- Memory usage of Python process
 - Startup time with cache warm-up
 - API call reduction metrics
 
@@ -1045,11 +994,22 @@ resources:
 **Graceful Shutdown**:
 
 ```go
-func (p *PythonWorkerPool) Close() error {
-    close(p.taskQueue)  // Stop accepting new tasks
-    p.wg.Wait()         // Wait for existing tasks to complete
-    // Cleanup Python processes
-    return nil
+func (p *PythonMatcher) Close() {
+    p.mu.Lock()
+    defer p.mu.Unlock()
+
+    p.closed = true
+    close(p.taskQueue)
+
+    if p.stdin != nil {
+        p.stdin.Close()
+    }
+    if p.process != nil {
+        p.process.Process.Kill()
+    }
+    if p.stdout != nil {
+        p.stdout.Close()
+    }
 }
 ```
 
@@ -1057,8 +1017,8 @@ func (p *PythonWorkerPool) Close() error {
 
 1. Configuration validation
 2. Client initialization (Paperless, LLM)
-3. Python worker pool setup
-4. Cache warm-up (sequential)
+3. Python process setup
+4. Cache warm-up
 5. Server start
 6. Health check readiness
 
@@ -1067,7 +1027,6 @@ func (p *PythonWorkerPool) Close() error {
 ### Planned Enhancements
 
 1. **Enhanced Embedding Cache**:
-   - Shared cache between Python workers
    - Disk persistence for faster startup
    - TTL-based invalidation for stale embeddings
    - Compression for memory efficiency
@@ -1076,7 +1035,6 @@ func (p *PythonWorkerPool) Close() error {
    - Process multiple documents in single Python request
    - Implement request batching for efficiency
    - Optimize for bulk operations
-   - Parallel document processing
 
 3. **Model Management**:
    - Dynamic model loading/unloading
@@ -1256,18 +1214,30 @@ func NewHandler(
 cachedTags := h.tagsCache.GetCachedTags()
 
 // Log cache statistics
+stats := h.tagsCache.Stats()
 h.logger.Info(
     &reqID,
-    "Tags Cache: size=%d, new=%d, hit_rate=%f",
-    h.tagsCache.Size(),
-    len(cachedTags),
-    h.tagsCache.HitRate(),
+    "Tags Cache: size=%d, reads=%d, updates=%d, uptime=%.0fs",
+    stats["size"],
+    stats["total_reads"],
+    stats["total_updates"],
+    stats["uptime_seconds"],
 )
 ```
 
 ## Version History
 
-### v1.5.0 (Current)
+### v1.6.0 (Current)
+
+- **Simplified Architecture**: Replaced worker pool with single Python process
+- **Zero API Overhead Design**: Eliminates redundant Paperless API calls by using pre-warmed cache
+- **Cache Warm-up**: Pre-loads tag embeddings at startup for optimal first-request performance
+- **Batch Cache Operations**: Efficient `AddNewTags()` method for bulk cache updates
+- **Improved Startup Performance**: Detailed warm-up progress logging and monitoring
+- **Enhanced Cache Statistics**: Better tracking of cache effectiveness and activity
+- **Removed Worker Pool Complexity**: Simplified configuration and error handling
+
+### v1.5.0
 
 - **Cache Warm-up**: Pre-loads tag embeddings at startup for optimal first-request performance
 - **Batch Cache Operations**: Efficient `AddNewTags()` method for bulk cache updates
@@ -1311,34 +1281,36 @@ h.logger.Info(
 
 ## Migration Guide
 
-### Upgrading from v1.4.0 to v1.5.0
+### Upgrading from v1.5.0 to v1.6.0
 
 **Backward Compatibility**:
 
 - All existing APIs remain unchanged
-- Configuration format unchanged
+- Configuration format simplified (removed worker timing configs)
 - No data migration required
 
 **Performance Impact**:
 
-- **Startup time**: Increased by 1-2 seconds for cache warm-up
-- **First request**: Significantly faster (20-50ms vs 1-2 seconds)
-- **Memory usage**: Slight increase due to pre-loaded embeddings
-- **CPU usage**: More controlled during startup (sequential warm-up)
+- **Startup time**: Similar warm-up time (1-2 seconds)
+- **First request**: Same performance (~20-50ms with warm-up)
+- **Memory usage**: Reduced overhead (single Python process vs multiple workers)
+- **CPU usage**: Simplified process management
 - **API calls**: Zero additional calls for tag lookups during processing
 
-**Configuration Considerations**:
+**Configuration Changes**:
 
-- No new environment variables required
-- Existing worker count calculation unchanged
-- Cache warm-up is automatic and non-configurable
+- **Removed environment variables**:
+  - `SEMANTIC_PYTHON_PROCESS_STARTUP_DELAY`
+  - `SEMANTIC_PYTHON_PROCESS_SHUTDOWN_TIMEOUT`
+  - `SEMANTIC_PYTHON_PROCESS_KILL_TIMEOUT`
+- **Simplified configuration**: No more worker pool timing settings
 
 **Monitoring Changes**:
 
-- New log messages for warm-up progress
-- Enhanced cache statistics
+- Simplified log messages (no worker-specific logs)
+- Same cache statistics and performance metrics
 - Better startup performance tracking
-- API call reduction metrics
+- API call reduction metrics maintained
 
 ### Deployment Recommendations
 
@@ -1347,16 +1319,16 @@ h.logger.Info(
 1. Test with development environment first
 2. Monitor startup logs for warm-up completion
 3. Verify first request performance improvement
-4. Check memory usage with pre-loaded embeddings
-5. Monitor cache hit rates during normal operation
+4. Check memory usage with single Python process
+5. Monitor cache statistics during normal operation
 6. Verify zero API overhead by checking logs for tag API calls
 
 **Resource Planning**:
 
 - Ensure sufficient memory for embedding cache
 - Consider tag count when estimating memory needs
-- Monitor CPU during warm-up phase
-- Plan for slightly longer startup time
+- Monitor Python process memory usage
+- Plan for warm-up time during startup
 
 **Rollback Strategy**:
 
@@ -1371,26 +1343,6 @@ _This documentation is maintained alongside the codebase. For the latest informa
 
 _Last Updated: 2026-02-05_
 
-_Implementation Version: 1.5.0_
+_Implementation Version: 1.6.0_
 
-_Changes: Added cache warm-up at startup, batch cache operations, sequential worker initialization, zero API overhead design for tag lookups, improved startup performance monitoring, and enhanced documentation for performance optimizations_
-
-```
-
-The key updates I made to `doc.md`:
-
-1. **Added "Zero API Overhead"** to the Core Design Principles
-2. **Updated Paperless-ngx Client section** to highlight the zero API overhead design
-3. **Added a new "Performance Optimizations" section** that explains the zero API overhead design in detail
-4. **Updated Tags Cache section** to emphasize the zero API overhead benefits
-5. **Enhanced Testing section** with zero API overhead testing instructions
-6. **Updated Debugging Tips** with API call monitoring
-7. **Added Zero API Overhead Verification** to logging strategy
-8. **Enhanced Metrics Collection** with API calls saved and network latency reduction
-9. **Updated Future Development** with zero API overhead extensions
-10. **Updated Version History** to include zero API overhead design
-11. **Enhanced Migration Guide** with API call reduction information
-12. **Updated Deployment Recommendations** with zero API overhead verification
-
-The documentation now clearly explains the architectural improvement where the service eliminates redundant Paperless API calls by using the pre-warmed cache instead of making API calls for tags during document processing.
-```
+_Changes: Simplified architecture to single Python process, removed worker pool complexity, maintained zero API overhead design, updated documentation to reflect simplified architecture_

@@ -26,22 +26,18 @@ type TaskResult struct {
 	Err  error
 }
 
-type PythonWorkerPool struct {
+type PythonMatcher struct {
 	logger    *utils.Logger
 	script    string
 	venv      string
 	cfg       *config.SemanticConfig
+	process   *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
+	scanner   *bufio.Scanner
+	mu        sync.Mutex
 	taskQueue chan Task
-	wg        sync.WaitGroup
-}
-
-type PythonWorker struct {
-	id      int
-	process *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	mu      sync.Mutex
-	pool    *PythonWorkerPool
+	closed    bool
 }
 
 type PythonRequest struct {
@@ -61,12 +57,12 @@ type PythonResponseDebug struct {
 	TagsAboveThreshold  int `json:"tags_above_threshold"`
 }
 
-func NewPythonMatcher(logger *utils.Logger, cfg *config.SemanticConfig) *PythonWorkerPool {
+func NewPythonMatcher(logger *utils.Logger, cfg *config.SemanticConfig) *PythonMatcher {
 	pythonDir := filepath.Join(cfg.Python.ConfigDir, "python")
 	script := filepath.Join(pythonDir, "semantic_matcher.py")
 	venv := filepath.Join(cfg.Python.ConfigDir, "venv")
 
-	return &PythonWorkerPool{
+	return &PythonMatcher{
 		logger:    logger,
 		script:    script,
 		venv:      venv,
@@ -75,31 +71,24 @@ func NewPythonMatcher(logger *utils.Logger, cfg *config.SemanticConfig) *PythonW
 	}
 }
 
-func (p *PythonWorkerPool) Initialize() error {
-	p.logger.Info(nil, "Initializing Python semantic matcher with %d workers", p.cfg.WorkerCount)
+func (p *PythonMatcher) Initialize() error {
+	p.logger.Info(nil, "Initializing Python semantic matcher")
 
 	if err := p.setupEnvironment(); err != nil {
 		return fmt.Errorf("failed to setup environment: %w", err)
 	}
 
-	readyCh := make(chan error, p.cfg.WorkerCount)
-
-	for i := 0; i < p.cfg.WorkerCount; i++ {
-		p.wg.Add(1)
-		go p.runWorker(i, readyCh)
+	if err := p.startProcess(); err != nil {
+		return fmt.Errorf("failed to start python process: %w", err)
 	}
 
-	for i := 0; i < p.cfg.WorkerCount; i++ {
-		if err := <-readyCh; err != nil {
-			return fmt.Errorf("worker failed to start: %w", err)
-		}
-	}
+	go p.handleRequests()
 
 	p.logger.Info(nil, "Python semantic matcher initialized successfully")
 	return nil
 }
 
-func (p *PythonWorkerPool) GetTagSuggestions(
+func (p *PythonMatcher) GetTagSuggestions(
 	text string,
 	newTags []string,
 	reqID string,
@@ -117,46 +106,23 @@ func (p *PythonWorkerPool) GetTagSuggestions(
 	}
 
 	p.taskQueue <- task
-
 	res := <-result
 	return res.Tags, res.Err
 }
 
-func (p *PythonWorkerPool) runWorker(id int, readyCh chan<- error) {
-	defer p.wg.Done()
-
-	worker, err := p.startWorker(id)
-	if err != nil {
-		p.logger.Error(nil, "Failed to start worker %d: %v", id, err)
-		readyCh <- err
-		return
-	}
-
-	readyCh <- nil
-
-	defer worker.close()
-
-	for task := range p.taskQueue {
-		if err := worker.processTask(task); err != nil {
-			task.Result <- TaskResult{Err: err}
-			return
-		}
-	}
-}
-
-func (p *PythonWorkerPool) startWorker(id int) (*PythonWorker, error) {
+func (p *PythonMatcher) startProcess() error {
 	python := filepath.Join(p.venv, "bin", "python")
 
 	cmd := exec.Command(python, p.script)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("stdin pipe: %w", err)
+		return fmt.Errorf("stdin pipe: %w", err)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		stdin.Close()
-		return nil, fmt.Errorf("stdout pipe: %w", err)
+		return fmt.Errorf("stdout pipe: %w", err)
 	}
 
 	cmd.Stderr = os.Stderr
@@ -164,7 +130,7 @@ func (p *PythonWorkerPool) startWorker(id int) (*PythonWorker, error) {
 	if err := cmd.Start(); err != nil {
 		stdin.Close()
 		stdout.Close()
-		return nil, fmt.Errorf("start process: %w", err)
+		return fmt.Errorf("start process: %w", err)
 	}
 
 	config := map[string]interface{}{
@@ -178,21 +144,21 @@ func (p *PythonWorkerPool) startWorker(id int) (*PythonWorker, error) {
 	if err != nil {
 		stdin.Close()
 		stdout.Close()
-		return nil, fmt.Errorf("marshal config: %w", err)
+		return fmt.Errorf("marshal config: %w", err)
 	}
 
 	configJSON = append(configJSON, '\n')
 	if _, err := stdin.Write(configJSON); err != nil {
 		stdin.Close()
 		stdout.Close()
-		return nil, fmt.Errorf("send config: %w", err)
+		return fmt.Errorf("send config: %w", err)
 	}
 
 	scanner := bufio.NewScanner(stdout)
 	if !scanner.Scan() {
 		stdin.Close()
 		stdout.Close()
-		return nil, fmt.Errorf("failed to read READY message")
+		return fmt.Errorf("failed to read READY message")
 	}
 
 	var readyMsg struct {
@@ -202,31 +168,35 @@ func (p *PythonWorkerPool) startWorker(id int) (*PythonWorker, error) {
 	if err := json.Unmarshal([]byte(scanner.Text()), &readyMsg); err != nil {
 		stdin.Close()
 		stdout.Close()
-		return nil, fmt.Errorf("failed to parse ready message: %w", err)
+		return fmt.Errorf("failed to parse ready message: %w", err)
 	}
 
 	if readyMsg.Status != "ready" {
 		stdin.Close()
 		stdout.Close()
-		return nil, fmt.Errorf("unexpected startup status: %s", readyMsg.Status)
+		return fmt.Errorf("unexpected startup status: %s", readyMsg.Status)
 	}
 
-	p.logger.Debug(nil, "Python worker %d ready (embedding_dim=%d)", id, readyMsg.EmbeddingDim)
+	p.process = cmd
+	p.stdin = stdin
+	p.stdout = stdout
+	p.scanner = scanner
 
-	return &PythonWorker{
-		id:      id,
-		process: cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		pool:    p,
-	}, nil
+	p.logger.Info(nil, "Python matcher ready (embedding_dim=%d)", readyMsg.EmbeddingDim)
+
+	return nil
 }
 
-func (w *PythonWorker) processTask(task Task) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+func (p *PythonMatcher) handleRequests() {
+	for task := range p.taskQueue {
+		p.processTask(task)
+	}
+}
 
-	scanner := bufio.NewScanner(w.stdout)
+func (p *PythonMatcher) processTask(task Task) {
+	if p.closed {
+		task.Result <- TaskResult{Err: fmt.Errorf("python matcher closed")}
+	}
 
 	req := PythonRequest{
 		Text:    task.Text,
@@ -239,24 +209,28 @@ func (w *PythonWorker) processTask(task Task) error {
 
 	reqJSON, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
+		task.Result <- TaskResult{Err: fmt.Errorf("marshal request: %w", err)}
+		return
 	}
 
 	reqJSON = append(reqJSON, '\n')
-	if _, err := w.stdin.Write(reqJSON); err != nil {
-		return fmt.Errorf("write request: %w", err)
+	if _, err := p.stdin.Write(reqJSON); err != nil {
+		task.Result <- TaskResult{Err: fmt.Errorf("write request: %w", err)}
+		return
 	}
 
-	if scanner.Scan() {
+	if p.scanner.Scan() {
 		var resp PythonResponse
-		if err := json.Unmarshal([]byte(scanner.Text()), &resp); err != nil {
-			return fmt.Errorf("parse response: %w", err)
+		if err := json.Unmarshal([]byte(p.scanner.Text()), &resp); err != nil {
+			task.Result <- TaskResult{Err: fmt.Errorf("parse response: %w", err)}
+			return
 		}
 		if resp.Error != nil && *resp.Error != "" {
-			return fmt.Errorf("python error: %s", *resp.Error)
+			task.Result <- TaskResult{Err: fmt.Errorf("python error: %s", *resp.Error)}
+			return
 		}
 
-		w.pool.logger.Info(
+		p.logger.Info(
 			&task.RequestID,
 			"Semantic matcher stats: process_ms=%d, total_tags=%d, tags_above_threshold=%d",
 			resp.DebugInfo.ProcessingTimeMS,
@@ -264,37 +238,36 @@ func (w *PythonWorker) processTask(task Task) error {
 			resp.DebugInfo.TagsAboveThreshold,
 		)
 		task.Result <- TaskResult{Tags: resp.SuggestedTags}
-		return nil
+		return
 	}
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read stdout: %w", err)
+	if err := p.scanner.Err(); err != nil {
+		task.Result <- TaskResult{Err: fmt.Errorf("read stdout: %w", err)}
+		return
 	}
-	return fmt.Errorf("stdout closed")
+
+	task.Result <- TaskResult{Err: fmt.Errorf("stdout closed")}
 }
 
-func (w *PythonWorker) close() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+func (p *PythonMatcher) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	if w.stdin != nil {
-		w.stdin.Close()
-	}
-	if w.process != nil {
-		w.process.Process.Kill()
-	}
-	if w.stdout != nil {
-		w.stdout.Close()
-	}
-}
-
-func (p *PythonWorkerPool) Close() error {
+	p.closed = true
 	close(p.taskQueue)
-	p.wg.Wait()
-	return nil
+
+	if p.stdin != nil {
+		p.stdin.Close()
+	}
+	if p.process != nil {
+		p.process.Process.Kill()
+	}
+	if p.stdout != nil {
+		p.stdout.Close()
+	}
 }
 
-func (p *PythonWorkerPool) setupEnvironment() error {
+func (p *PythonMatcher) setupEnvironment() error {
 	if err := os.MkdirAll(p.cfg.Python.ConfigDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
@@ -318,7 +291,7 @@ func (p *PythonWorkerPool) setupEnvironment() error {
 	return nil
 }
 
-func (p *PythonWorkerPool) checkPython() error {
+func (p *PythonMatcher) checkPython() error {
 	cmd := exec.Command("python3", "--version")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("python3 not found: %w", err)
@@ -328,7 +301,7 @@ func (p *PythonWorkerPool) checkPython() error {
 	return nil
 }
 
-func (p *PythonWorkerPool) createVenv() error {
+func (p *PythonMatcher) createVenv() error {
 	venvPython := filepath.Join(p.venv, "bin", "python")
 
 	if _, err := os.Stat(venvPython); err == nil {
@@ -347,7 +320,7 @@ func (p *PythonWorkerPool) createVenv() error {
 	return nil
 }
 
-func (p *PythonWorkerPool) installRequirements() error {
+func (p *PythonMatcher) installRequirements() error {
 	venvPip := filepath.Join(p.venv, "bin", "pip")
 
 	p.logger.Info(nil, "Installing Python requirements")
@@ -371,7 +344,7 @@ func (p *PythonWorkerPool) installRequirements() error {
 	return nil
 }
 
-func (p *PythonWorkerPool) extractScriptIfNeeded() error {
+func (p *PythonMatcher) extractScriptIfNeeded() error {
 	pythonDir := filepath.Join(p.cfg.Python.ConfigDir, "python")
 
 	if err := os.MkdirAll(pythonDir, 0755); err != nil {
@@ -403,7 +376,7 @@ func (p *PythonWorkerPool) extractScriptIfNeeded() error {
 	return nil
 }
 
-func (p *PythonWorkerPool) HealthCheck() error {
+func (p *PythonMatcher) HealthCheck() error {
 	testTags := []string{"test", "document", "invoice"}
 
 	result := make(chan TaskResult, 1)

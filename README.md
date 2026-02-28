@@ -14,7 +14,7 @@ A microservice that integrates with Paperless-ngx via webhooks to automatically 
 - **Semantic Tag Matching**: Suggest relevant existing tags using sentence-transformers embeddings with intelligent caching
 - **Intelligent Text Reduction**: Reduce long documents before LLM processing to save tokens
 - **Multi-language Support**: Works with documents in any language using multilingual models
-- **Worker Pool Architecture**: Concurrent processing with auto-scaled Python workers
+- **Single Process Architecture**: Simplified single Python process for semantic matching
 - **Zero Configuration Setup**: Embedded Python scripts with automatic environment setup
 - **Manual Processing**: Process untagged documents via API endpoint
 - **Request Tracing**: Automatic request ID generation and propagation for easy debugging
@@ -58,10 +58,9 @@ On first execution, the service will:
 2. Extract embedded Python scripts
 3. Create Python virtual environment
 4. Install dependencies (`sentence-transformers`, `torch`, `numpy`)
-5. Start worker processes with auto-calculated worker count
+5. Start single Python process for semantic matching
 6. **Cache Warm-up**: Pre-load all Paperless tags into both Go and Python embedding caches
-7. **Sequential Initialization**: Warm up workers sequentially to avoid CPU spikes
-8. **Ready for Processing**: Service starts with zero API overhead for tag lookups
+7. **Ready for Processing**: Service starts with zero API overhead for tag lookups
 
 ## Configuration
 
@@ -87,7 +86,6 @@ LOG_LEVEL=info
 # Semantic matching
 SEMANTIC_MODEL_NAME=all-MiniLM-L6-v2  # or multilingual model
 SEMANTIC_MIN_SIMILARITY=0.2
-SEMANTIC_WORKER_COUNT=2  # do not include for automatic
 
 # Text reduction
 REDUCTION_THRESHOLD_TOKENS=2000
@@ -118,9 +116,9 @@ Paperless-ngx Webhook → Document Fetch → Length Check → Semantic Tag Match
 ### Startup Sequence
 
 ```
-1. Configuration Loading → 2. Client Initialization → 3. Worker Pool Setup → 4. Cache Warm-up → 5. Server Start
+1. Configuration Loading → 2. Client Initialization → 3. Python Process Setup → 4. Cache Warm-up → 5. Server Start
                               ↓                           ↓                      ↓
-                      Paperless/LLM clients      Python workers start    Tags pre-loaded into caches
+                      Paperless/LLM clients      Single Python process    Tags pre-loaded into caches
 ```
 
 ### Key Components
@@ -128,22 +126,20 @@ Paperless-ngx Webhook → Document Fetch → Length Check → Semantic Tag Match
 1. **Webhook Handler** (`internal/api/`): Receives and validates Paperless-ngx webhooks
 2. **Document Fetcher** (`internal/paperless/`): Retrieves document content via REST API
 3. **Text Reducer** (`internal/processor/`): Reduces long documents using TF-Graph-Position algorithm
-4. **Semantic Matcher** (`internal/semantic/`): Python worker pool for tag similarity matching with embedding cache
+4. **Semantic Matcher** (`internal/semantic/`): Single Python process for tag similarity matching with embedding cache
 5. **LLM Client** (`internal/llm/`): Sends prompts and parses structured JSON responses
 6. **Document Updater**: Applies validated metadata back to Paperless-ngx
 7. **Tags Cache** (`internal/utils/cache.go`): Thread-safe cache with batch operations
 
-### Worker Pool Architecture
+### Simplified Architecture
 
-The semantic matcher uses a worker pool for concurrent processing:
+The semantic matcher uses a **single Python process** for all semantic matching:
 
-- **Auto-scaled workers**: Based on CPU cores and available memory
-- **Task queue**: 100-task buffer for handling bursts
-- **Embedding cache**: Each Python worker caches tag embeddings for 10x performance
-- **Health monitoring**: Built-in health checks with automatic recovery
-- **Graceful shutdown**: Proper cleanup of Python processes
-- **Sequential warm-up**: Workers initialized sequentially to prevent CPU spikes
-- **Blocking initialization**: Service waits for all workers to be ready before accepting requests
+- **Single process**: Simplified architecture with no worker coordination needed
+- **Embedding cache**: Single shared cache for all tag embeddings
+- **Task queue**: 100-task buffer for handling concurrent requests
+- **Health monitoring**: Built-in health checks
+- **Graceful shutdown**: Proper cleanup of Python process
 
 ### Cache Architecture
 
@@ -151,16 +147,16 @@ The semantic matcher uses a worker pool for concurrent processing:
 
 1. **Go Tags Cache** (`utils.TagsCache`):
    - Thread-safe with `sync.RWMutex`
-   - Batch operations via `GetMissingAndAdd()`
-   - Hit rate tracking for monitoring
+   - Batch operations via `AddNewTags()`
+   - Statistics tracking for monitoring
    - Pre-loaded at startup with all Paperless tags
    - **Zero API overhead**: Eliminates redundant Paperless API calls during processing
 
 2. **Python Embedding Cache**:
-   - Per-worker in-memory cache
+   - Single in-memory cache in Python process
    - Tag → embedding dictionary
    - Warm-up at startup for optimal first-request performance
-   - Statistics tracking (hits, misses, hit rates)
+   - Statistics tracking (processing time, tags considered)
 
 **Cache Warm-up Process**:
 
@@ -169,12 +165,15 @@ The semantic matcher uses a worker pool for concurrent processing:
 tags, err := paperlessClient.GetTags(warmReqId)
 
 // 2. Pre-load into Go cache
-cachedTags := tagsCache.GetMissingAndAdd(initialTags)
-
-// 3. Sequentially warm up each Python worker
-for i := 0; i < cfg.Semantic.WorkerCount; i++ {
-    _, err := semanticMatcher.GetTagSuggestions("dummy", cachedTags, workerReqId)
+initialTags := []utils.CacheItem{}
+for _, t := range tags {
+    initialTags = append(initialTags, utils.NewCacheItem(t.ID, t.Name))
 }
+tagsCache.AddNewTags(initialTags)
+
+// 3. Warm up Python embedding cache
+cachedTags := tagsCache.GetCachedTagsValues()
+_, err = semanticMatcher.GetTagSuggestions("dummy", cachedTags, warmReqId)
 ```
 
 ## Performance Optimizations
@@ -210,14 +209,12 @@ cachedTags := h.tagsCache.GetCachedTags()  // Zero API overhead
 
 - **First request**: ~20-50ms (embeddings already cached)
 - **Startup time**: Additional 1-2 seconds for warm-up
-- **CPU usage**: Sequential warm-up prevents spikes
 - **API calls**: Zero additional calls for tag lookups during processing
 
 **Without Cache Warm-up**:
 
 - **First request**: ~1-2 seconds (computes all tag embeddings)
 - **Startup time**: Faster initial startup
-- **CPU usage**: Potential spikes during first requests
 - **API calls**: Still zero for tag lookups (uses cold cache)
 
 ## API Endpoints
@@ -280,7 +277,7 @@ Every request automatically receives a unique request ID that propagates through
 ```
 [INFO] POST /webhook REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671
 [DEBUG] REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671 Fetching document 123
-[DEBUG] REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671 Semantic matcher stats: cache_hit_rate=100%
+[DEBUG] REQID=ea63fdf8-883d-45d2-a0b1-7144e29f1671 Semantic matcher stats: process_ms=23, total_tags=1561
 ```
 
 This makes debugging production issues significantly easier.
@@ -289,16 +286,15 @@ This makes debugging production issues significantly easier.
 
 ### Resource Requirements
 
-- **CPU**: 2-4 cores recommended
-- **RAM**: 1-2GB (Go) + 400-800MB (Python workers)
+- **CPU**: 1-2 cores recommended
+- **RAM**: 1-2GB (Go) + 400-800MB (Python process)
 - **Storage**: ~500MB-1GB for Python dependencies
 
 ### Throughput
 
 - **Documents/second**: 2-10 (varies by model and document length)
-- **Concurrent processing**: Multiple workers handle requests in parallel
-- **Auto-scaling**: Worker count adjusts based on system resources
-- **Cache performance**: 90%+ cache hit rate after initial tag embedding
+- **Concurrent processing**: Go goroutines handle requests in parallel
+- **Cache performance**: All tag embeddings cached after warm-up
 - **API efficiency**: Zero additional API calls for tag lookups during processing
 
 ### Startup Performance
@@ -307,14 +303,12 @@ This makes debugging production issues significantly easier.
 
 - **First request**: ~20-50ms (embeddings already cached)
 - **Startup time**: Additional 1-2 seconds for warm-up
-- **CPU usage**: Sequential warm-up prevents spikes
 - **API calls**: 1 call to Paperless for tags (at startup only)
 
 **Without Cache Warm-up**:
 
 - **First request**: ~1-2 seconds (computes all tag embeddings)
 - **Startup time**: Faster initial startup
-- **CPU usage**: Potential spikes during first requests
 - **API calls**: 1 call to Paperless for tags (at startup only)
 
 ### Embedding Cache
@@ -322,8 +316,8 @@ This makes debugging production issues significantly easier.
 The semantic matcher includes an intelligent embedding cache:
 
 - **Warm-up at startup**: All tag embeddings pre-computed during initialization
-- **Batch operations**: Efficient `GetMissingAndAdd()` for bulk cache updates
-- **Cache persistence**: Cache lives for Python worker lifetime
+- **Batch operations**: Efficient `AddNewTags()` for bulk cache updates
+- **Cache persistence**: Cache lives for Python process lifetime
 - **Cache statistics**: Logged per request for monitoring
 - **Thread-safe operations**: Proper locking for concurrent access
 - **Zero API overhead**: No Paperless API calls for tag lookups during processing
@@ -341,7 +335,7 @@ itzamna/
 │   ├── llm/                   # LLM client
 │   ├── paperless/             # Paperless API client
 │   ├── processor/             # Text reduction
-│   ├── semantic/              # Semantic matching with Python workers
+│   ├── semantic/              # Semantic matching with single Python process
 │   └── utils/                 # Utilities (logging, HTTP helpers, cache)
 └── README.md
 ```
@@ -377,7 +371,7 @@ export SEMANTIC_MODEL_NAME="paraphrase-multilingual-MiniLM-L12-v2"
 
 ### Common Issues
 
-**Python workers fail to start:**
+**Python process fails to start:**
 
 - Ensure Python 3.8+ is installed
 - Check write permissions to `~/.config/itzamna/`
@@ -391,8 +385,8 @@ export SEMANTIC_MODEL_NAME="paraphrase-multilingual-MiniLM-L12-v2"
 
 **Memory issues:**
 
-- Reduce `SEMANTIC_WORKER_COUNT` for constrained environments
-- Use smaller models (`all-MiniLM-L6-v2` uses ~90MB per worker)
+- Use smaller models (`all-MiniLM-L6-v2` uses ~90MB)
+- Monitor Python process memory usage
 
 **Untagged documents not being processed:**
 
@@ -428,23 +422,18 @@ export RAW_BODY_LOG=true
 
 Key metrics available in logs:
 
-- **Cache hit rate**: Percentage of tag embeddings served from cache
+- **Cache size**: Number of tags cached
 - **Processing time**: Time spent in semantic matching
 - **New tags cached**: Number of new embeddings computed per request
-- **Total cache size**: Number of tag embeddings cached
-- **Warm-up progress**: Worker initialization status during startup
+- **Warm-up progress**: Cache initialization status during startup
 - **API calls saved**: Number of redundant Paperless API calls eliminated
 
 Example log output:
 
 ```
-[INFO] Warming up semantic matcher worker 1/3
-[INFO] Worker 1/3 warmed up successfully
-[INFO] Warming up semantic matcher worker 2/3
-[INFO] Worker 2/3 warmed up successfully
-[INFO] Warming up semantic matcher worker 3/3
-[INFO] Worker 3/3 warmed up successfully
-[INFO] Tags Cache: size=1561, new=0, hit_rate=0.50
+[INFO] Warming up semantic matcher
+[INFO] Semantic matcher embeddings warmed up successfully
+[INFO] Tags Cache: size=1561, reads=1, updates=1, uptime=2s
 [DEBUG] Semantic matcher stats: process_ms=23, total_tags_considered=1561, tags_above_threshold=15
 ```
 
@@ -462,6 +451,6 @@ All models are open-source and freely available for commercial use.
 
 _Last Updated: 2026-02-05_
 
-_Implementation Version: 1.5.0_
+_Implementation Version: 1.6.0_
 
-_Changes: Added cache warm-up at startup, batch cache operations, sequential worker initialization, zero API overhead design for tag lookups, and improved startup performance monitoring_
+_Changes: Simplified architecture to single Python process, removed worker pool complexity, maintained zero API overhead design, updated documentation to reflect simplified architecture_
