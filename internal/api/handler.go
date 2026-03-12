@@ -294,7 +294,7 @@ func (h *Handler) Process(document *paperless.Document, reqID string) error {
 	h.logger.Info(&reqID, "Created %d new tags (failed: %d) and cache updated.",
 		len(createdTags.CreatedTags), len(createdTags.FailedTags))
 
-	maxStringLength := 127
+	maxStringLength := 60
 
 	correspondent, err := h.paperless.CreateCorrespondent(
 		utils.Truncate(result.Author, maxStringLength), reqID,

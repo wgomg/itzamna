@@ -426,33 +426,70 @@ func (c *Client) UpdateDocument(documentID int, update *DocumentUpdate, reqID st
 		return fmt.Errorf("failed to marshal update: %w", err)
 	}
 
-	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(body))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+	maxRetries := 3
+	var lastError error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(body))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+
+		c.setAuthHeaders(req)
+		req.Header.Set("Content-Type", "application/json")
+
+		c.logger.Debug(
+			&reqID,
+			"Updating document ID=%d, Title=%s, DocumentType=%d, Correspondent=%d, Tags=%v - (attempt %d/%d)",
+			documentID,
+			update.Title,
+			update.DocumentType,
+			update.Correspondent,
+			update.Tags,
+			attempt,
+			maxRetries,
+		)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastError = fmt.Errorf("failed to update document (attempt: %d): %w", attempt, err)
+			c.logger.Error(&reqID, "Update attempt %d failed: %v", attempt, err)
+
+			if attempt < maxRetries {
+				// exponential backoff: 2^attempt seconds
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				time.Sleep(backoff)
+				continue
+			}
+			defer resp.Body.Close()
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			c.logger.Info(
+				&reqID,
+				"Document %d updated successfully (attempt %d)",
+				documentID,
+				attempt,
+			)
+			return nil
+		}
+
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusGatewayTimeout {
+			lastError := c.handleAPIError(resp)
+
+			c.logger.Error(&reqID, "Update attempt %d failed: %s",
+				attempt, lastError.Error())
+
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				time.Sleep(backoff)
+				continue
+			}
+			return lastError
+		}
 	}
 
-	c.setAuthHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
-
-	c.logger.Debug(&reqID,
-		"Updating document ID=%d, Title=%s, DocumentType=%d, Correspondent=%d, Tags=%v",
-		documentID,
-		update.Title,
-		update.DocumentType,
-		update.Correspondent,
-		update.Tags,
-	)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to update document: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return c.handleAPIError(resp)
-	}
-
-	return nil
+	return lastError
 }
 
 func (c *Client) setAuthHeaders(req *http.Request) {
