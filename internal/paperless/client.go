@@ -461,6 +461,7 @@ func (c *Client) UpdateDocument(documentID int, update *DocumentUpdate, reqID st
 				time.Sleep(backoff)
 				continue
 			}
+			return lastError
 		}
 		defer resp.Body.Close()
 
@@ -477,7 +478,6 @@ func (c *Client) UpdateDocument(documentID int, update *DocumentUpdate, reqID st
 		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusGatewayTimeout {
 			apiErr := c.handleAPIError(resp)
 			lastError = apiErr
-			lastError = c.handleAPIError(resp)
 
 			c.logger.Error(&reqID, "Update attempt %d failed: %s",
 				attempt, lastError.Error())
