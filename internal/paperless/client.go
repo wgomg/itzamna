@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"time"
@@ -257,6 +258,7 @@ func (c *Client) CreateTags(newTags []string, reqID string) (*CreateTagsResult, 
 
 		c.setAuthHeaders(req)
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
 
 		c.logger.Debug(&reqID, "Creating new paperless tag: %s", string(jsonNewTag))
 
@@ -393,6 +395,7 @@ func (c *Client) CreateCorrespondent(correspondent string, reqID string) (*Corre
 
 	c.setAuthHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
 	c.logger.Debug(&reqID, "Creating new paperless correspondent: %s", string(jsonNewCorrespondent))
 
@@ -437,6 +440,7 @@ func (c *Client) UpdateDocument(documentID int, update *DocumentUpdate, reqID st
 
 		c.setAuthHeaders(req)
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
 
 		c.logger.Debug(
 			&reqID,
@@ -456,9 +460,20 @@ func (c *Client) UpdateDocument(documentID int, update *DocumentUpdate, reqID st
 			c.logger.Error(&reqID, "Update attempt %d failed: %v", attempt, err)
 
 			if attempt < maxRetries {
-				// exponential backoff: 2^attempt seconds
-				backoff := time.Duration(1<<uint(attempt)) * time.Second
-				time.Sleep(backoff)
+				base := 5 // 5-second base
+				backoff := time.Duration(base<<uint(attempt)) * time.Second
+
+				// cap at 5 minutes (300 seconds)
+				maxBackoff := 300 * time.Second
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+
+				// add jitter to prevent thundering herd
+				jitterRange := backoff / 4
+				jitter := time.Duration(rand.Int63n(int64(jitterRange*2))) - jitterRange
+
+				time.Sleep(backoff + jitter)
 				continue
 			}
 			return lastError
